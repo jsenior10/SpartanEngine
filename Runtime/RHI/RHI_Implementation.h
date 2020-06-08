@@ -28,6 +28,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // RUNTIME
 #if defined(SPARTAN_RUNTIME) || (SPARTAN_RUNTIME_STATIC == 1)
 
+
 // Definition - DirectX 11
 #if defined(API_GRAPHICS_D3D11)
 #pragma comment(lib, "d3d11.lib")
@@ -152,6 +153,7 @@ static const D3D11_BLEND_OP d3d11_blend_operation[] =
 #pragma comment(lib, "dxgi.lib")
 #pragma warning(push, 0) // Hide warnings which belong DirectX
 #include <d3d12.h>
+#include <dxgi1_3.h>
 #include <dxgi1_4.h>
 #pragma warning(pop)
 #endif
@@ -310,31 +312,33 @@ static const VkImageLayout vulkan_image_layout[] =
 };
 #endif
 
-// HEADER DEPENDENCIES
-#if defined (API_GRAPHICS_D3D11)
-    #include <stdint.h>
-#elif defined (API_GRAPHICS_VULKAN)
+// RHI_Context header dependencies
+#include "RHI_Definition.h"
+#if defined (API_GRAPHICS_VULKAN)
     #include "Vulkan/vk_mem_alloc.h"
     #include <vector>
     #include <unordered_map>
 #endif
 
-// RHI CONTEXT - All
+// RHI_Context
 namespace Spartan
 {
     struct RHI_Context
     {
         #if defined(API_GRAPHICS_D3D11)
-            ID3D11Device* device                    = nullptr;
-            ID3D11DeviceContext* device_context     = nullptr;
+            RHI_Api_Type api_type                   = RHI_Api_D3d11;
+            ID3D11Device5* device                   = nullptr;
+            ID3D11DeviceContext4* device_context    = nullptr;
             ID3DUserDefinedAnnotation* annotation   = nullptr;
         #endif
 
         #if defined(API_GRAPHICS_D3D12)
-            ID3D12Device* device = nullptr;
+            RHI_Api_Type api_type   = RHI_Api_D3d12;
+            ID3D12Device* device    = nullptr;
         #endif
 
         #if defined(API_GRAPHICS_VULKAN)
+            RHI_Api_Type api_type                           = RHI_Api_Vulkan;
             uint32_t api_version                            = 0;
             VkInstance instance                             = nullptr;
             VkPhysicalDevice device_physical                = nullptr;

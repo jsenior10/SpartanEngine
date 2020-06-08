@@ -65,12 +65,12 @@ namespace Spartan
 
     void Renderer::CreateDepthStencilStates()
     {
-        // depth_test, depth_write, depth_function, stencil_test, stencil_write
-        m_depth_stencil_disabled                = make_shared<RHI_DepthStencilState>(m_rhi_device, false,   false,  GetComparisonFunction(), false, false);                         // nothing
-        m_depth_stencil_enabled_disabled_write  = make_shared<RHI_DepthStencilState>(m_rhi_device, true,    true,   GetComparisonFunction(), false, false);                         // depth
-        m_depth_stencil_enabled_disabled_read   = make_shared<RHI_DepthStencilState>(m_rhi_device, true,    false,  GetComparisonFunction(), false, false);                         // depth
-        m_depth_stencil_disabled_enabled_read   = make_shared<RHI_DepthStencilState>(m_rhi_device, false,   false,  GetComparisonFunction(), true,  false,  RHI_Comparison_Equal);  // depth + stencil
-        m_depth_stencil_enabled_enabled_write   = make_shared<RHI_DepthStencilState>(m_rhi_device, true,    true,   GetComparisonFunction(), true,  true,   RHI_Comparison_Always); // depth + stencil
+        // arguments: depth_test, depth_write, depth_function, stencil_test, stencil_write, stencil_function
+        m_depth_stencil_off_off     = make_shared<RHI_DepthStencilState>(m_rhi_device, false,   false,  GetComparisonFunction(), false, false);                         // no depth or stencil
+        m_depth_stencil_on_off_w    = make_shared<RHI_DepthStencilState>(m_rhi_device, true,    true,   GetComparisonFunction(), false, false);                         // depth
+        m_depth_stencil_on_off_r    = make_shared<RHI_DepthStencilState>(m_rhi_device, true,    false,  GetComparisonFunction(), false, false);                         // depth
+        m_depth_stencil_off_on_r    = make_shared<RHI_DepthStencilState>(m_rhi_device, false,   false,  GetComparisonFunction(), true,  false,  RHI_Comparison_Equal);  // depth + stencil
+        m_depth_stencil_on_on_w     = make_shared<RHI_DepthStencilState>(m_rhi_device, true,    true,   GetComparisonFunction(), true,  true,   RHI_Comparison_Always); // depth + stencil
     }
 
     void Renderer::CreateRasterizerStates()
@@ -144,12 +144,15 @@ namespace Spartan
             m_render_targets[RenderTarget_TaaHistory]           = make_unique<RHI_Texture2D>(m_context, width, height, RHI_Format_R16G16B16A16_Float, 1, 0, "rt_taa_history"); // Used for TAA accumulation
         }
 
-        // SSAO
-        m_render_targets[RenderTarget_Ssao_Noisy]   = make_unique<RHI_Texture2D>(m_context, static_cast<uint32_t>(width), static_cast<uint32_t>(height), RHI_Format_R8_Unorm, 1, 0, "rt_ssao_noisy");
-        m_render_targets[RenderTarget_Ssao]         = make_unique<RHI_Texture2D>(m_context, static_cast<uint32_t>(width), static_cast<uint32_t>(height), RHI_Format_R8_Unorm, 1, 0, "rt_ssao");
+        // HBAO
+        m_render_targets[RenderTarget_Hbao_Noisy]   = make_unique<RHI_Texture2D>(m_context, static_cast<uint32_t>(width), static_cast<uint32_t>(height), RHI_Format_R8_Unorm, 1, 0, "rt_hbao_noisy");
+        m_render_targets[RenderTarget_Hbao]         = make_unique<RHI_Texture2D>(m_context, static_cast<uint32_t>(width), static_cast<uint32_t>(height), RHI_Format_R8_Unorm, 1, 0, "rt_hbao");
 
         // SSR
         m_render_targets[RenderTarget_Ssr] = make_shared<RHI_Texture2D>(m_context, width, height, RHI_Format_R16G16_Float, 1, RHI_Texture_UnorderedAccessView, "rt_ssr");
+
+        // SSGI
+        //m_render_targets[RenderTarget_Ssgi] = make_shared<RHI_Texture2D>(m_context, width, height, RHI_Format_R11G11B10_Float, 1, RHI_Texture_UnorderedAccessView, "rt_ssgi");
 
         // Bloom
         {
@@ -318,13 +321,17 @@ namespace Spartan
         m_shaders[Shader_BlurGaussianBilateral_P]->AddDefine("PASS_BLUR_BILATERAL_GAUSSIAN");
         m_shaders[Shader_BlurGaussianBilateral_P]->CompileAsync(RHI_Shader_Pixel, dir_shaders + "Quad.hlsl");
 
-        // SSAO
-        m_shaders[Shader_Ssao_P] = make_shared<RHI_Shader>(m_context);
-        m_shaders[Shader_Ssao_P]->CompileAsync(RHI_Shader_Pixel, dir_shaders + "SSAO.hlsl");
+        // HBAO
+        m_shaders[Shader_Hbao_P] = make_shared<RHI_Shader>(m_context);
+        m_shaders[Shader_Hbao_P]->CompileAsync(RHI_Shader_Pixel, dir_shaders + "HBAO.hlsl");
 
         // SSR
         m_shaders[Shader_Ssr_P] = make_shared<RHI_Shader>(m_context);
         m_shaders[Shader_Ssr_P]->CompileAsync(RHI_Shader_Pixel, dir_shaders + "SSR.hlsl");
+
+        // SSGI
+        m_shaders[Shader_Ssgi_P] = make_shared<RHI_Shader>(m_context);
+        m_shaders[Shader_Ssgi_P]->CompileAsync(RHI_Shader_Pixel, dir_shaders + "SSGI.hlsl");
 
         // Entity
         m_shaders[Shader_Entity_V] = make_shared<RHI_Shader>(m_context);
@@ -363,7 +370,7 @@ namespace Spartan
         const auto dir_font = m_resource_cache->GetDataDirectory(Asset_Fonts) + "/";
 
         // Load a font (used for performance metrics)
-        m_font = make_unique<Font>(m_context, dir_font + "CalibriBold.ttf", 14, Vector4(0.8f, 0.8f, 0.8f, 1.0f));
+        m_font = make_unique<Font>(m_context, dir_font + "CalibriBold.ttf", 12, Vector4(0.8f, 0.8f, 0.8f, 1.0f));
     }
 
     void Renderer::CreateTextures()

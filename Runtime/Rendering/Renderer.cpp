@@ -65,9 +65,10 @@ namespace Spartan
         m_options |= Render_Bloom;
         m_options |= Render_VolumetricLighting;
         m_options |= Render_MotionBlur;
-        m_options |= Render_ScreenSpaceAmbientOcclusion;
+        m_options |= Render_HorizonBasedAmbientOcclusion;
         m_options |= Render_ScreenSpaceShadows;
-        m_options |= Render_ScreenSpaceReflections;	
+        m_options |= Render_ScreenSpaceReflections;
+        //m_options |= Render_ScreenSpaceGlobalIllumination;
         m_options |= Render_AntiAliasing_Taa;
         m_options |= Render_Sharpening_LumaSharpen;
 
@@ -363,7 +364,7 @@ namespace Spartan
         DrawLine(Vector3(min.x, max.y, max.z), Vector3(min.x, min.y, max.z), color, color, depth);
 	}
 
-    bool Renderer::UpdateFrameBuffer()
+	bool Renderer::UpdateFrameBuffer()
     {
         // Map
         BufferFrame* buffer = static_cast<BufferFrame*>(m_buffer_frame_gpu->Map());
