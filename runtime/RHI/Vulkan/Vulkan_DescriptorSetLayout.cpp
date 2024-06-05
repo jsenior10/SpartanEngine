@@ -73,7 +73,7 @@ namespace Spartan
                         descriptor.as_array ? descriptor.array_length : 1, // descriptorCount
                         descriptor.stage,                                  // stageFlags
                         nullptr                                            // pImmutableSamplers
-                    });                                                
+                    });
                 }
             }
 
@@ -91,9 +91,11 @@ namespace Spartan
 
             // stage flags
             VkShaderStageFlags stage_flags  = 0;
-            stage_flags                    |= (descriptor.stage & RHI_Shader_Vertex)  ? VK_SHADER_STAGE_VERTEX_BIT   : 0;
-            stage_flags                    |= (descriptor.stage & RHI_Shader_Pixel)   ? VK_SHADER_STAGE_FRAGMENT_BIT : 0;
-            stage_flags                    |= (descriptor.stage & RHI_Shader_Compute) ? VK_SHADER_STAGE_COMPUTE_BIT  : 0;
+            stage_flags                    |= (descriptor.stage & rhi_shader_type_to_mask(RHI_Shader_Type::Vertex))  ? VK_SHADER_STAGE_VERTEX_BIT                  : 0;
+            stage_flags                    |= (descriptor.stage & rhi_shader_type_to_mask(RHI_Shader_Type::Hull))    ? VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT    : 0;
+            stage_flags                    |= (descriptor.stage & rhi_shader_type_to_mask(RHI_Shader_Type::Domain))  ? VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT : 0;
+            stage_flags                    |= (descriptor.stage & rhi_shader_type_to_mask(RHI_Shader_Type::Pixel))   ? VK_SHADER_STAGE_FRAGMENT_BIT                : 0;
+            stage_flags                    |= (descriptor.stage & rhi_shader_type_to_mask(RHI_Shader_Type::Compute)) ? VK_SHADER_STAGE_COMPUTE_BIT                 : 0;
 
             layout_bindings[i].descriptorType     = static_cast<VkDescriptorType>(RHI_Device::GetDescriptorType(descriptor));
             layout_bindings[i].binding            = descriptor.slot;
@@ -120,7 +122,7 @@ namespace Spartan
         create_info.pBindings                       = layout_bindings.data();
 
         // descriptor set layout
-        SP_VK_ASSERT_MSG(
+        SP_ASSERT_VK_MSG(
             vkCreateDescriptorSetLayout(RHI_Context::device, &create_info, nullptr, reinterpret_cast<VkDescriptorSetLayout*>(&m_rhi_resource)),
             "Failed to allocate descriptor set layout");
 

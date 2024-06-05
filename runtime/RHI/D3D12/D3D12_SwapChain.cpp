@@ -62,6 +62,7 @@ namespace Spartan
         const uint32_t height,
         const RHI_Present_Mode present_mode,
         const uint32_t buffer_count,
+        const bool hdr,
         const char* name
     )
     {
@@ -91,7 +92,7 @@ namespace Spartan
         }
 
         // Copy parameters
-        m_format       = IsHdr() ? format_hdr : format_sdr;
+        m_format       = hdr ? format_hdr : format_sdr;
         m_buffer_count = buffer_count;
         m_width        = width;
         m_height       = height;
@@ -109,17 +110,18 @@ namespace Spartan
         swap_chain_desc.SwapEffect            = get_swap_effect();
         swap_chain_desc.SampleDesc.Count      = 1;
 
-        IDXGISwapChain1* swap_chain;
-        d3d12_utility::error::check(factory->CreateSwapChainForHwnd(
-            static_cast<ID3D12CommandQueue*>(RHI_Device::QueueGet(RHI_Queue_Type::Graphics)), // Swap chain needs the queue so that it can force a flush on it.
-            hwnd,
-            &swap_chain_desc,
-            nullptr,
-            nullptr,
-            &swap_chain
-        ));
+        SP_ASSERT_MSG(false, "Need to implement RHI_Device::QueueGet(RHI_Queue_Type::Graphics)");
+        //IDXGISwapChain1* swap_chain;
+        //d3d12_utility::error::check(factory->CreateSwapChainForHwnd(
+        //    static_cast<ID3D12CommandQueue*>(RHI_Device::QueueGet(RHI_Queue_Type::Graphics)), // todo: fix this again - swap chain needs the queue so that it can force a flush on it
+        //    hwnd,
+        //    &swap_chain_desc,
+        //    nullptr,
+        //    nullptr,
+        //    &swap_chain
+        //));
 
-        m_rhi_swapchain = static_cast<void*>(swap_chain);
+       //m_rhi_swapchain = static_cast<void*>(swap_chain);
         m_image_index   = static_cast<IDXGISwapChain3*>(m_rhi_swapchain)->GetCurrentBackBufferIndex();
     }
     

@@ -40,6 +40,44 @@ using namespace std;
 
 namespace Spartan
 {
+    namespace
+    {
+        VkPipelineShaderStageCreateInfo create_shader_stage(const RHI_Shader* shader)
+        {
+            VkPipelineShaderStageCreateInfo shader_stage_info = {};
+            shader_stage_info.sType                           = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            shader_stage_info.module                          = static_cast<VkShaderModule>(shader->GetRhiResource());
+            shader_stage_info.pName                           = shader->GetEntryPoint();
+
+            if (shader->GetShaderStage() == RHI_Shader_Type::Vertex)
+            {
+                shader_stage_info.stage = VK_SHADER_STAGE_VERTEX_BIT;
+            }
+            else if (shader->GetShaderStage() == RHI_Shader_Type::Hull)
+            {
+                shader_stage_info.stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+            }
+            else if (shader->GetShaderStage() == RHI_Shader_Type::Domain)
+            {
+                shader_stage_info.stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+            }
+            else if (shader->GetShaderStage() == RHI_Shader_Type::Pixel)
+            {
+                shader_stage_info.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+            }
+            else if (shader->GetShaderStage() == RHI_Shader_Type::Compute)
+            {
+                shader_stage_info.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            }
+
+            SP_ASSERT(shader_stage_info.stage  != 0);
+            SP_ASSERT(shader_stage_info.module != nullptr);
+            SP_ASSERT(shader_stage_info.pName  != nullptr);
+
+            return shader_stage_info;
+        }
+    }
+
     RHI_Pipeline::RHI_Pipeline(RHI_PipelineState& pipeline_state, RHI_DescriptorSetLayout* descriptor_set_layout)
     {
         m_state = pipeline_state;
@@ -68,13 +106,14 @@ namespace Spartan
                 if (descriptor.type == RHI_Descriptor_Type::PushConstantBuffer)
                 {
                     SP_ASSERT(descriptor.struct_size <= RHI_Device::PropertyGetMaxPushConstantSize());
-
+                    
                     VkPushConstantRange push_constant_range  = {};
-                    push_constant_range.offset               = 0;
                     push_constant_range.size                 = descriptor.struct_size;
-                    push_constant_range.stageFlags           = (descriptor.stage & RHI_Shader_Stage::RHI_Shader_Vertex)  ? VK_SHADER_STAGE_VERTEX_BIT   : 0;
-                    push_constant_range.stageFlags          |= (descriptor.stage & RHI_Shader_Stage::RHI_Shader_Pixel)   ? VK_SHADER_STAGE_FRAGMENT_BIT : 0;
-                    push_constant_range.stageFlags          |= (descriptor.stage & RHI_Shader_Stage::RHI_Shader_Compute) ? VK_SHADER_STAGE_COMPUTE_BIT  : 0;
+                    push_constant_range.stageFlags          |= (descriptor.stage & rhi_shader_type_to_mask(RHI_Shader_Type::Vertex))  ? VK_SHADER_STAGE_VERTEX_BIT                  : 0;
+                    push_constant_range.stageFlags          |= (descriptor.stage & rhi_shader_type_to_mask(RHI_Shader_Type::Hull))    ? VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT    : 0;
+                    push_constant_range.stageFlags          |= (descriptor.stage & rhi_shader_type_to_mask(RHI_Shader_Type::Domain))  ? VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT : 0;
+                    push_constant_range.stageFlags          |= (descriptor.stage & rhi_shader_type_to_mask(RHI_Shader_Type::Pixel))   ? VK_SHADER_STAGE_FRAGMENT_BIT                : 0;
+                    push_constant_range.stageFlags          |= (descriptor.stage & rhi_shader_type_to_mask(RHI_Shader_Type::Compute)) ? VK_SHADER_STAGE_COMPUTE_BIT                 : 0;
 
                     push_constant_ranges.emplace_back(push_constant_range);
                 }
@@ -90,7 +129,7 @@ namespace Spartan
             pipeline_layout_info.pPushConstantRanges        = push_constant_ranges.data();
 
             // create
-            SP_VK_ASSERT_MSG(vkCreatePipelineLayout(RHI_Context::device, &pipeline_layout_info, nullptr, reinterpret_cast<VkPipelineLayout*>(&m_resource_pipeline_layout)),
+            SP_ASSERT_VK_MSG(vkCreatePipelineLayout(RHI_Context::device, &pipeline_layout_info, nullptr, reinterpret_cast<VkPipelineLayout*>(&m_resource_pipeline_layout)),
                 "Failed to create pipeline layout");
 
             // name
@@ -104,20 +143,21 @@ namespace Spartan
         VkRect2D scissor                                 = {};
         VkPipelineViewportStateCreateInfo viewport_state = {};
         {
-            // enable dynamic states
-            dynamic_states.push_back(VK_DYNAMIC_STATE_VIEWPORT);
-            if (m_state.IsGraphics())
-            {
-                dynamic_states.push_back(VK_DYNAMIC_STATE_SCISSOR);
-                dynamic_states.push_back(VK_DYNAMIC_STATE_CULL_MODE);
-            }
-
             // dynamic states
-            dynamic_state.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-            dynamic_state.pNext             = nullptr;
-            dynamic_state.flags             = 0;
-            dynamic_state.dynamicStateCount = static_cast<uint32_t>(dynamic_states.size());
-            dynamic_state.pDynamicStates    = dynamic_states.data();
+            {
+                dynamic_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+                dynamic_state.pNext = nullptr;
+                dynamic_state.flags = 0;
+                dynamic_states.push_back(VK_DYNAMIC_STATE_VIEWPORT);
+                if (m_state.IsGraphics())
+                {
+                    dynamic_states.push_back(VK_DYNAMIC_STATE_SCISSOR);
+                    dynamic_states.push_back(VK_DYNAMIC_STATE_CULL_MODE);
+                    dynamic_states.push_back(VK_DYNAMIC_STATE_FRAGMENT_SHADING_RATE_KHR);
+                }
+                dynamic_state.dynamicStateCount = static_cast<uint32_t>(dynamic_states.size());
+                dynamic_state.pDynamicStates    = dynamic_states.data();
+            }
 
             // viewport
             vkViewport.x        = 0;
@@ -143,70 +183,29 @@ namespace Spartan
 
         // shader stages
         vector<VkPipelineShaderStageCreateInfo> shader_stages;
-
-        // shader - vertex
-        if (m_state.shader_vertex)
+        for (uint32_t i = 0; i < static_cast<uint32_t>(RHI_Shader_Type::Max); i++)
         {
-            VkPipelineShaderStageCreateInfo shader_stage_info = {};
-            shader_stage_info.sType                           = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-            shader_stage_info.stage                           = VK_SHADER_STAGE_VERTEX_BIT;
-            shader_stage_info.module                          = static_cast<VkShaderModule>(m_state.shader_vertex->GetRhiResource());
-            shader_stage_info.pName                           = m_state.shader_vertex->GetEntryPoint();
-
-            // Validate shader stage
-            SP_ASSERT(shader_stage_info.module != nullptr);
-            SP_ASSERT(shader_stage_info.pName != nullptr);
-
-            shader_stages.push_back(shader_stage_info);
-        }
-
-        // shader - pixel
-        if (m_state.shader_pixel)
-        {
-            VkPipelineShaderStageCreateInfo shader_stage_info = {};
-            shader_stage_info.sType                           = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-            shader_stage_info.stage                           = VK_SHADER_STAGE_FRAGMENT_BIT;
-            shader_stage_info.module                          = static_cast<VkShaderModule>(m_state.shader_pixel->GetRhiResource());
-            shader_stage_info.pName                           = m_state.shader_pixel->GetEntryPoint();
-
-            // validate shader stage
-            SP_ASSERT(shader_stage_info.module != nullptr);
-            SP_ASSERT(shader_stage_info.pName != nullptr);
-
-            shader_stages.push_back(shader_stage_info);
-        }
-
-        // shader - compute
-        if (m_state.shader_compute)
-        {
-            VkPipelineShaderStageCreateInfo shader_stage_info = {};
-            shader_stage_info.sType                           = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-            shader_stage_info.stage                           = VK_SHADER_STAGE_COMPUTE_BIT;
-            shader_stage_info.module                          = static_cast<VkShaderModule>(m_state.shader_compute->GetRhiResource());
-            shader_stage_info.pName                           = m_state.shader_compute->GetEntryPoint();
-
-            // validate shader stage
-            SP_ASSERT(shader_stage_info.module != nullptr);
-            SP_ASSERT(shader_stage_info.pName != nullptr);
-
-            shader_stages.push_back(shader_stage_info);
+            if (RHI_Shader* shader = m_state.shaders[i])
+            { 
+                shader_stages.push_back(create_shader_stage(shader));
+            }
         }
 
         // binding and vertex attribute descriptions
         vector<VkVertexInputBindingDescription> vertex_input_binding_descs;
         vector<VkVertexInputAttributeDescription> vertex_attribute_descs;
-        if (m_state.shader_vertex)
+        RHI_Shader* shader_vertex = m_state.shaders[RHI_Shader_Type::Vertex];
+        if (shader_vertex)
         {
             vertex_input_binding_descs.push_back
             ({
                 0,
-                m_state.shader_vertex ? m_state.shader_vertex->GetVertexSize() : 0,
+                shader_vertex ? shader_vertex->GetVertexSize() : 0,
                 VK_VERTEX_INPUT_RATE_VERTEX
             });
 
             if (m_state.instancing)
             {
-                // hardcoded for now
                 vertex_input_binding_descs.push_back
                 ({
                     1,                            // binding
@@ -215,7 +214,7 @@ namespace Spartan
                 });
             }
 
-            if (RHI_InputLayout* input_layout = m_state.shader_vertex->GetInputLayout().get())
+            if (RHI_InputLayout* input_layout = shader_vertex->GetInputLayout().get())
             {
                 vertex_attribute_descs.reserve(input_layout->GetAttributeDescriptions().size());
                 for (const auto& desc : input_layout->GetAttributeDescriptions())
@@ -257,30 +256,31 @@ namespace Spartan
             vertex_input_state.pVertexAttributeDescriptions    = vertex_attribute_descs.data();
         }
         
-        // input assembly
+        // input assembly state
         VkPipelineInputAssemblyStateCreateInfo input_assembly_state = {};
         {
             input_assembly_state.sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-            input_assembly_state.topology               = vulkan_primitive_topology[static_cast<uint32_t>(m_state.primitive_toplogy)];
+            input_assembly_state.topology               = m_state.HasTessellation() ? VK_PRIMITIVE_TOPOLOGY_PATCH_LIST : vulkan_primitive_topology[static_cast<uint32_t>(m_state.primitive_toplogy)];
             input_assembly_state.primitiveRestartEnable = VK_FALSE;
         }
-        
+
+        // tessellation state
+        VkPipelineTessellationStateCreateInfo tesselation_state = {};
+        {
+            tesselation_state.sType              = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+            tesselation_state.patchControlPoints = m_state.HasTessellation() ? 3 : 1;
+        }
+
         // rasterizer state
-        VkPipelineRasterizationStateCreateInfo rasterizer_state             = {};
-        VkPipelineRasterizationDepthClipStateCreateInfoEXT depth_clip_state = {};
+        VkPipelineRasterizationStateCreateInfo rasterizer_state = {};
         if (m_state.rasterizer_state)
         {
-            depth_clip_state.sType           = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_DEPTH_CLIP_STATE_CREATE_INFO_EXT;
-            depth_clip_state.depthClipEnable = m_state.rasterizer_state->GetDepthClipEnabled();
-            depth_clip_state.pNext           = nullptr;
-
             rasterizer_state.sType                   = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-            rasterizer_state.pNext                   = &depth_clip_state;
-            rasterizer_state.depthClampEnable        = VK_FALSE;
+            rasterizer_state.depthClampEnable        = !m_state.rasterizer_state->GetDepthClipEnabled();
             rasterizer_state.rasterizerDiscardEnable = VK_FALSE;
             rasterizer_state.polygonMode             = vulkan_polygon_mode[static_cast<uint32_t>(m_state.rasterizer_state->GetPolygonMode())];
             rasterizer_state.lineWidth               = m_state.rasterizer_state->GetLineWidth();
-            rasterizer_state.cullMode                = vulkan_cull_mode[static_cast<uint32_t>(m_state.rasterizer_state->GetCullMode())];
+            rasterizer_state.cullMode                = vulkan_cull_mode[static_cast<uint32_t>(RHI_CullMode::Back)];
             rasterizer_state.frontFace               = VK_FRONT_FACE_CLOCKWISE;
             rasterizer_state.depthBiasEnable         = m_state.rasterizer_state->GetDepthBias() != 0.0f ? VK_TRUE : VK_FALSE;
             rasterizer_state.depthBiasConstantFactor = Math::Helper::Floor(m_state.rasterizer_state->GetDepthBias() * (float)(1 << 24));
@@ -289,11 +289,11 @@ namespace Spartan
         }
         
         // multisampling
-        VkPipelineMultisampleStateCreateInfo multisampling_state = {};
+        VkPipelineMultisampleStateCreateInfo multisample_state = {};
         {
-            multisampling_state.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-            multisampling_state.sampleShadingEnable  = VK_FALSE;
-            multisampling_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+            multisample_state.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+            multisample_state.sampleShadingEnable  = VK_FALSE;
+            multisample_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
         }
         
         VkPipelineColorBlendStateCreateInfo color_blend_state = {};
@@ -370,6 +370,7 @@ namespace Spartan
                 // enable dynamic rendering - VK_KHR_dynamic_rendering
                 // this means no render passes and no frame buffer objects
                 VkPipelineRenderingCreateInfoKHR pipeline_rendering_create_info = {};
+                VkPipelineFragmentShadingRateStateCreateInfoKHR fragment_shading_rate_state = {};
                 vector<VkFormat> attachment_formats_color;
                 VkFormat attachment_format_depth   = VK_FORMAT_UNDEFINED;
                 VkFormat attachment_format_stencil = VK_FORMAT_UNDEFINED;
@@ -399,6 +400,18 @@ namespace Spartan
                         attachment_format_stencil = tex_depth->IsStencilFormat() ? attachment_format_depth : VK_FORMAT_UNDEFINED;
                     }
 
+                    // variable rate shading
+                    if (m_state.vrs_input_texture)
+                    { 
+                        fragment_shading_rate_state.sType          = VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR;
+                        fragment_shading_rate_state.combinerOps[0] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MAX_KHR;
+                        fragment_shading_rate_state.combinerOps[1] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MAX_KHR;
+                        fragment_shading_rate_state.fragmentSize   = { 1, 1 };
+
+                        pipeline_rendering_create_info.pNext = &fragment_shading_rate_state;
+                    }
+
+                    // put everything together
                     pipeline_rendering_create_info.sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
                     pipeline_rendering_create_info.colorAttachmentCount    = static_cast<uint32_t>(attachment_formats_color.size());
                     pipeline_rendering_create_info.pColorAttachmentFormats = attachment_formats_color.data();
@@ -406,43 +419,37 @@ namespace Spartan
                     pipeline_rendering_create_info.stencilAttachmentFormat = attachment_format_stencil;
                 }
 
-                // describe
-                VkGraphicsPipelineCreateInfo pipeline_info = {};
-                pipeline_info.pNext                        = &pipeline_rendering_create_info;
-                pipeline_info.sType                        = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-                pipeline_info.stageCount                   = static_cast<uint32_t>(shader_stages.size());
-                pipeline_info.pStages                      = shader_stages.data();
-                pipeline_info.pVertexInputState            = &vertex_input_state;
-                pipeline_info.pInputAssemblyState          = &input_assembly_state;
-                pipeline_info.pDynamicState                = &dynamic_state;
-                pipeline_info.pViewportState               = &viewport_state;
-                pipeline_info.pRasterizationState          = &rasterizer_state;
-                pipeline_info.pMultisampleState            = &multisampling_state;
-                pipeline_info.pColorBlendState             = &color_blend_state;
-                pipeline_info.pDepthStencilState           = &depth_stencil_state;
-                pipeline_info.layout                       = static_cast<VkPipelineLayout>(m_resource_pipeline_layout);
-                pipeline_info.renderPass                   = nullptr;
-        
-                // Create
-                SP_VK_ASSERT_MSG(vkCreateGraphicsPipelines(RHI_Context::device, nullptr, 1, &pipeline_info, nullptr, pipeline),
-                    "Failed to create graphics pipeline");
+                // create
+                {
+                    VkGraphicsPipelineCreateInfo pipeline_info = {};
+                    pipeline_info.pNext                        = &pipeline_rendering_create_info;
+                    pipeline_info.sType                        = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+                    pipeline_info.stageCount                   = static_cast<uint32_t>(shader_stages.size());
+                    pipeline_info.pStages                      = shader_stages.data();
+                    pipeline_info.pVertexInputState            = &vertex_input_state;
+                    pipeline_info.pInputAssemblyState          = &input_assembly_state;
+                    pipeline_info.pTessellationState           = &tesselation_state;
+                    pipeline_info.pDynamicState                = &dynamic_state;
+                    pipeline_info.pViewportState               = &viewport_state;
+                    pipeline_info.pRasterizationState          = &rasterizer_state;
+                    pipeline_info.pMultisampleState            = &multisample_state;
+                    pipeline_info.pColorBlendState             = &color_blend_state;
+                    pipeline_info.pDepthStencilState           = &depth_stencil_state;
+                    pipeline_info.layout                       = static_cast<VkPipelineLayout>(m_resource_pipeline_layout);
+                    pipeline_info.flags                        = m_state.vrs_input_texture ? VK_PIPELINE_CREATE_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR : 0;
 
-                // disable naming until I can come up with a more meaningful name
-                // vulkan_utility::debug::set_name(*pipeline, m_state.pass_name);
+                    SP_ASSERT_VK_MSG(vkCreateGraphicsPipelines(RHI_Context::device, nullptr, 1, &pipeline_info, nullptr, pipeline), "Failed to create graphics pipeline");
+                    RHI_Device::SetResourceName(static_cast<void*>(*pipeline), RHI_Resource_Type::Pipeline, pipeline_state.name);
+                }
             }
             else if (pipeline_state.IsCompute())
             {
-                // describe
                 VkComputePipelineCreateInfo pipeline_info = {};
                 pipeline_info.sType                       = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
                 pipeline_info.layout                      = static_cast<VkPipelineLayout>(m_resource_pipeline_layout);
                 pipeline_info.stage                       = shader_stages[0];
 
-                // create
-                SP_VK_ASSERT_MSG(vkCreateComputePipelines(RHI_Context::device, nullptr, 1, &pipeline_info, nullptr, pipeline),
-                    "Failed to create compute pipeline");
-
-                // name
+                SP_ASSERT_VK_MSG(vkCreateComputePipelines(RHI_Context::device, nullptr, 1, &pipeline_info, nullptr, pipeline),"Failed to create compute pipeline");
                 RHI_Device::SetResourceName(static_cast<void*>(*pipeline), RHI_Resource_Type::Pipeline, pipeline_state.name);
             }
         }

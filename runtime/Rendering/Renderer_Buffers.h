@@ -47,7 +47,7 @@ namespace Spartan
         Math::Vector2 taa_jitter_current;
         Math::Vector2 taa_jitter_previous;
 
-        float time;
+        float directional_light_intensity;
         float delta_time;
         uint32_t frame;
         uint32_t options;
@@ -58,12 +58,16 @@ namespace Spartan
         Math::Vector3 camera_direction;
         float camera_far;
 
-        float gamma;
         float camera_last_movement_time;
-        Math::Vector2 padding;
+        float hdr_enabled;
+        float hdr_max_nits;
+        float hdr_white_point;
 
         Math::Vector3 camera_position_previous;
-        uint32_t material_index;
+        float resolution_scale;
+
+        double time;
+        Math::Vector2 padding;
 
         void set_bit(const bool set, const uint32_t bit)
         {
@@ -73,29 +77,32 @@ namespace Spartan
         bool operator==(const Cb_Frame& rhs) const
         {
             return
-                view                       == rhs.view                       &&
-                projection                 == rhs.projection                 &&
-                view_projection            == rhs.view_projection            &&
-                view_projection_inv        == rhs.view_projection_inv        &&
-                view_projection_ortho      == rhs.view_projection_ortho      &&
-                view_projection_unjittered == rhs.view_projection_unjittered &&
-                view_projection_previous   == rhs.view_projection_previous   &&
-                time                       == rhs.time                       &&
-                delta_time                 == rhs.delta_time                 &&
-                frame                      == rhs.frame                      &&
-                camera_near                == rhs.camera_near                &&
-                camera_far                 == rhs.camera_far                 &&
-                camera_position            == rhs.camera_position            &&
-                camera_position_previous   == rhs.camera_position_previous   &&
-                camera_direction           == rhs.camera_direction           &&
-                camera_last_movement_time  == rhs.camera_last_movement_time  &&
-                gamma                      == rhs.gamma                      &&
-                resolution_output          == rhs.resolution_output          &&
-                resolution_render          == rhs.resolution_render          &&
-                taa_jitter_current         == rhs.taa_jitter_current         &&
-                taa_jitter_previous        == rhs.taa_jitter_previous        &&
-                material_index             == rhs.material_index             &&
-                options                    == rhs.options;
+                view                        == rhs.view                       &&
+                projection                  == rhs.projection                 &&
+                view_projection             == rhs.view_projection            &&
+                view_projection_inv         == rhs.view_projection_inv        &&
+                view_projection_ortho       == rhs.view_projection_ortho      &&
+                view_projection_unjittered  == rhs.view_projection_unjittered &&
+                view_projection_previous    == rhs.view_projection_previous   &&
+                time                        == rhs.time                       &&
+                delta_time                  == rhs.delta_time                 &&
+                frame                       == rhs.frame                      &&
+                camera_near                 == rhs.camera_near                &&
+                camera_far                  == rhs.camera_far                 &&
+                camera_position             == rhs.camera_position            &&
+                camera_position_previous    == rhs.camera_position_previous   &&
+                camera_direction            == rhs.camera_direction           &&
+                camera_last_movement_time   == rhs.camera_last_movement_time  &&
+                resolution_output           == rhs.resolution_output          &&
+                resolution_render           == rhs.resolution_render          &&
+                taa_jitter_current          == rhs.taa_jitter_current         &&
+                taa_jitter_previous         == rhs.taa_jitter_previous        &&
+                resolution_scale            == rhs.resolution_scale           &&
+                hdr_enabled                 == rhs.hdr_enabled                &&
+                hdr_max_nits                == rhs.hdr_max_nits               &&
+                hdr_white_point             == rhs.hdr_white_point            &&
+                directional_light_intensity == rhs.directional_light_intensity &&
+                options                     == rhs.options;
         }
 
         bool operator!=(const Cb_Frame& rhs) const { return !(*this == rhs); }
@@ -112,29 +119,11 @@ namespace Spartan
             m_value = transform_previous;
         }
 
-        void set_resolution_in(const RHI_Texture* texture)
+        void set_f2_value(float x, float y)
         {
-            m_value.m03 = static_cast<float>(texture->GetWidth());
-            m_value.m22 = static_cast<float>(texture->GetHeight());
-        };
-
-        void set_resolution_in(const Math::Vector2& resolution)
-        {
-            m_value.m03 = resolution.x;
-            m_value.m22 = resolution.y;
-        };
-
-        void set_resolution_out(const RHI_Texture* texture)
-        {
-            m_value.m23 = static_cast<float>(texture->GetWidth());
-            m_value.m30 = static_cast<float>(texture->GetHeight());
-        };
-
-        void set_resolution_out(const Math::Vector2& resolution)
-        {
-            m_value.m23 = resolution.x;
-            m_value.m30 = resolution.y;
-        };
+            m_value.m23 = x;
+            m_value.m30 = y;
+        }
 
         void set_f3_value(const Math::Vector3& value)
         {
@@ -164,12 +153,12 @@ namespace Spartan
             m_value.m31 = z;
         };
 
-        void set_f4_value(const Math::Vector4& color)
+        void set_f4_value(const Color& color)
         {
-            m_value.m10 = color.x;
-            m_value.m11 = color.y;
-            m_value.m12 = color.z;
-            m_value.m13 = color.w;
+            m_value.m10 = color.r;
+            m_value.m11 = color.g;
+            m_value.m12 = color.b;
+            m_value.m33 = color.a;
         };
 
         void set_f4_value(const float x, const float y, const float z, const float w)
@@ -177,17 +166,13 @@ namespace Spartan
             m_value.m10 = x;
             m_value.m11 = y;
             m_value.m12 = z;
-            m_value.m13 = w;
+            m_value.m33 = w;
         };
 
-        void set_material_index(const uint32_t index)
+        void set_is_transparent_and_material_index(const bool is_transparent, const uint32_t material_index = 0)
         {
-            m_value.m32 = static_cast<float>(index);
-        }
-
-        void set_is_transparent(const bool is_transparent)
-        {
-            m_value.m33 = is_transparent ? 1.0f : 0.0f;
+            m_value.m03 = static_cast<float>(material_index);
+            m_value.m13 = is_transparent ? 1.0f : 0.0f;
         }
 
         bool operator==(const Pcb_Pass& rhs) const
@@ -226,35 +211,28 @@ namespace Spartan
 
     struct Sb_Light
     {
-        Math::Matrix view_projection[6];
-
-        float intensity;
-        float range;
-        float angle;
-        float bias;
+        Math::Matrix view_projection[2];
 
         Color color;
 
         Math::Vector3 position;
-        float normal_bias;
+        float intensity;
 
         Math::Vector3 direction;
+        float range;
+
+        float angle;
         uint32_t flags;
+        Math::Vector2 padding;
 
         bool operator==(const Sb_Light& rhs)
         {
             return
                 view_projection[0] == rhs.view_projection[0] &&
                 view_projection[1] == rhs.view_projection[1] &&
-                view_projection[2] == rhs.view_projection[2] &&
-                view_projection[3] == rhs.view_projection[3] &&
-                view_projection[4] == rhs.view_projection[4] &&
-                view_projection[5] == rhs.view_projection[5] &&
                 intensity          == rhs.intensity          &&
                 range              == rhs.range              &&
                 angle              == rhs.angle              &&
-                bias               == rhs.bias               &&
-                normal_bias        == rhs.normal_bias        &&
                 color              == rhs.color              &&
                 position           == rhs.position           &&
                 direction          == rhs.direction          &&

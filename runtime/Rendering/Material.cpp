@@ -88,7 +88,6 @@ namespace Spartan
         m_textures.fill(nullptr);
         m_properties.fill(0.0f);
 
-        // initialize properties
         SetProperty(MaterialProperty::CullMode,         static_cast<float>(RHI_CullMode::Back));
         SetProperty(MaterialProperty::CanBeEdited,      1.0f);
         SetProperty(MaterialProperty::ColorR,           1.0f);
@@ -99,7 +98,7 @@ namespace Spartan
         SetProperty(MaterialProperty::TextureTilingX,   1.0f);
         SetProperty(MaterialProperty::TextureTilingY,   1.0f);
         SetProperty(MaterialProperty::WorldSpaceHeight, 1.0f);
-        SetProperty(MaterialProperty::Ior,              1.333f); // water
+        SetProperty(MaterialProperty::Ior,              Material::EnumToIor(MaterialIor::Air));
     }
 
     bool Material::LoadFromFile(const std::string& file_path)
@@ -144,7 +143,7 @@ namespace Spartan
             SetTexture(tex_type, texture);
         }
 
-        m_object_size_cpu = sizeof(*this);
+        m_object_size = sizeof(*this);
 
         return true;
     }
@@ -233,7 +232,7 @@ namespace Spartan
 
     void Material::SetTexture(const MaterialTexture texture_type, const string& file_path)
     {
-        SetTexture(texture_type, ResourceCache::Load<RHI_Texture2D>(file_path, RHI_Texture_Srv | RHI_Texture_Mips | RHI_Texture_Compressed));
+        SetTexture(texture_type, ResourceCache::Load<RHI_Texture2D>(file_path, RHI_Texture_Srv));
     }
  
     bool Material::HasTexture(const string& path) const
@@ -308,7 +307,7 @@ namespace Spartan
         return max<uint32_t>(*max_element(begin(max_index), end(max_index)), 1);
     }
 
-	void Material::SetProperty(const MaterialProperty property_type, float value)
+    void Material::SetProperty(const MaterialProperty property_type, float value)
     {
         if (m_properties[static_cast<uint32_t>(property_type)] == value)
             return;
@@ -331,13 +330,17 @@ namespace Spartan
 
         if (property_type == MaterialProperty::Ior)
         {
-            // 2.4 - diamond
-            value = clamp(value, 1.0f, 2.4f);
+            value = clamp(value, Material::EnumToIor(MaterialIor::Air), Material::EnumToIor(MaterialIor::Diamond));
         }
 
         m_properties[static_cast<uint32_t>(property_type)] = value;
 
-        SP_FIRE_EVENT(EventType::MaterialOnChanged);
+        // if the world is loading, don't fire an event as we will spam the event system
+        // also the renderer will check all the materials after loading anyway
+        if (!ProgressTracker::GetProgress(ProgressType::World).IsProgressing())
+        {
+            SP_FIRE_EVENT(EventType::MaterialOnChanged);
+        }
     }
 
     void Material::SetColor(const Color& color)
@@ -346,5 +349,44 @@ namespace Spartan
         SetProperty(MaterialProperty::ColorG, color.g);
         SetProperty(MaterialProperty::ColorB, color.b);
         SetProperty(MaterialProperty::ColorA, color.a);
+    }
+
+    bool Material::IsAlphaTested()
+    {
+        bool albedo_mask = false;
+        if (RHI_Texture* texture = GetTexture(MaterialTexture::Color))
+        {
+            albedo_mask = texture->IsSemiTransparent();
+        }
+
+        return HasTexture(MaterialTexture::AlphaMask) || albedo_mask;
+    }
+
+    float Material::EnumToIor(const MaterialIor ior)
+    {
+        switch (ior)
+        {
+            case MaterialIor::Air:      return 1.0f;
+            case MaterialIor::Water:    return 1.33f;
+            case MaterialIor::Eyes:     return 1.38f;
+            case MaterialIor::Glass:    return 1.52f;
+            case MaterialIor::Sapphire: return 1.76f;
+            case MaterialIor::Diamond:  return 2.42f;
+            default:                    return 1.0f;
+        }
+    }
+
+    MaterialIor Material::IorToEnum(const float ior)
+    {
+        const float epsilon = 0.001f;
+
+        if (std::abs(ior - 1.0f)  < epsilon) return MaterialIor::Air;
+        if (std::abs(ior - 1.33f) < epsilon) return MaterialIor::Water;
+        if (std::abs(ior - 1.38f) < epsilon) return MaterialIor::Eyes;
+        if (std::abs(ior - 1.52f) < epsilon) return MaterialIor::Glass;
+        if (std::abs(ior - 1.76f) < epsilon) return MaterialIor::Sapphire;
+        if (std::abs(ior - 2.42f) < epsilon) return MaterialIor::Diamond;
+
+        return MaterialIor::Air;
     }
 }

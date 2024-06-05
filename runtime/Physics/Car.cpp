@@ -26,10 +26,11 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "BulletPhysicsHelper.h"
 #include "../Rendering/Renderer.h"
 #include "../Input/Input.h"
+#include "../World/Entity.h"
+#include "../World/Components/AudioSource.h"
 SP_WARNINGS_OFF
 #include <BulletDynamics/Vehicle/btRaycastVehicle.h>
 #include "LinearMath/btVector3.h"
-#include "../World/Entity.h"
 SP_WARNINGS_ON
 //==================================================
 
@@ -346,11 +347,11 @@ namespace Spartan
 
                 // draw fz force
                 Math::Vector3 fz_end = start + Math::Vector3(parameters.pacejka_fz[wheel_index] * wheel_forward_dir) * 0.2f;
-                Renderer::DrawDirectionalArrow(start, fz_end, arrow_size, Vector4(0.0f, 1.0f, 0.0f, 1.0f), 0.0, false);
+                Renderer::DrawDirectionalArrow(start, fz_end, arrow_size, Color(0.0f, 1.0f, 0.0f, 1.0f), 0.0, false);
 
                 // draw fx force
                 Math::Vector3 fx_end = start + Math::Vector3(parameters.pacejka_fx[wheel_index] * wheel_right_dir) * 0.2f;
-                Renderer::DrawDirectionalArrow(start, fx_end, arrow_size, Vector4(1.0f, 0.0f, 0.0f, 1.0f), 0.0, false);
+                Renderer::DrawDirectionalArrow(start, fx_end, arrow_size, Color(1.0f, 0.0f, 0.0f, 1.0f), 0.0, false);
             }
         }
     }
@@ -534,7 +535,7 @@ namespace Spartan
         }
     }
 
-    void Car::Create(btRigidBody* chassis)
+    void Car::Create(btRigidBody* chassis, Entity* entity)
     {
         m_parameters.body = chassis;
 
@@ -601,6 +602,13 @@ namespace Spartan
                 }
             }
         }
+
+        // add basic audio
+        {
+            ///shared_ptr<AudioSource> audio_source = entity->AddComponent<AudioSource>();
+            ///audio_source->SetAudioClip("project\\music\\car_engine_idle.mp3");
+            ///audio_source->SetLoop(true);
+        }
     }
 
     void Car::Tick()
@@ -664,7 +672,7 @@ namespace Spartan
                 m_parameters.break_until_opposite_torque = false;
             }
 
-            if (Input::GetKey(KeyCode::Arrow_Up) || Input::GetControllerTriggerRight() != 0.0f)
+            if (Input::GetKey(KeyCode::Arrow_Up) || Input::GetGamepadTriggerRight() != 0.0f)
             {
                 if (m_parameters.movement_direction == CarMovementState::Backward)
                 {
@@ -675,7 +683,7 @@ namespace Spartan
                     m_parameters.throttle = 1.0f;
                 }
             }
-            else if (Input::GetKey(KeyCode::Arrow_Down) || Input::GetControllerTriggerLeft() != 0.0f)
+            else if (Input::GetKey(KeyCode::Arrow_Down) || Input::GetGamepadTriggerLeft() != 0.0f)
             {
                 if (m_parameters.movement_direction == CarMovementState::Forward)
                 {
@@ -699,11 +707,11 @@ namespace Spartan
         {
             float steering_angle_target = 0.0f;
 
-            if (Input::GetKey(KeyCode::Arrow_Left) || Input::GetControllerThumbStickLeft().x < 0.0f)
+            if (Input::GetKey(KeyCode::Arrow_Left) || Input::GetGamepadThumbStickLeft().x < 0.0f)
             {
                 steering_angle_target = -tuning::steering_angle_max;
             }
-            else if (Input::GetKey(KeyCode::Arrow_Right) || Input::GetControllerThumbStickLeft().x > 0.0f)
+            else if (Input::GetKey(KeyCode::Arrow_Right) || Input::GetGamepadThumbStickLeft().x > 0.0f)
             {
                 steering_angle_target = tuning::steering_angle_max;
             }

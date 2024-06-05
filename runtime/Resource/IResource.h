@@ -21,13 +21,13 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #pragma once
 
-//= INCLUDES ==================
+//= INCLUDES =====================
 #include <memory>
 #include <atomic>
 #include "../Core/FileSystem.h"
-#include "../Core/SpObject.h"
+#include "../Core/SpartanObject.h"
 #include "../Logging/Log.h"
-//=============================
+//================================
 
 namespace Spartan
 {
@@ -44,10 +44,10 @@ namespace Spartan
         Animation,
         Font,
         Shader,
-        Unknown,
+        Max,
     };
 
-    class SP_CLASS IResource : public SpObject
+    class SP_CLASS IResource : public SpartanObject
     {
     public:
         IResource(ResourceType type);
@@ -120,7 +120,7 @@ namespace Spartan
         static constexpr ResourceType TypeToEnum();
 
     protected:
-        ResourceType m_resource_type         = ResourceType::Unknown;
+        ResourceType m_resource_type         = ResourceType::Max;
         std::atomic<bool> m_is_ready_for_use = false;
         uint32_t m_flags                     = 0;
 

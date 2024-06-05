@@ -23,30 +23,22 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common.hlsl"
 //====================
 
-Pixel_PosColor mainVS(Vertex_PosColor input)
+struct vertex
 {
-    Pixel_PosColor output;
-
-    input.position.w = 1.0f;
-    output.position  = mul(input.position, buffer_pass.transform);
-    output.position  = mul(output.position, buffer_frame.view_projection_unjittered);
-    output.color     = input.color;
-    
-    return output;
-}
-
-struct PixelOutputType
-{
-    float4 color             : SV_Target0;
-    float fsr2_reactive_mask : SV_Target1;
+    float4 position : SV_POSITION;
+    float4 color    : COLOR0;
 };
 
-PixelOutputType mainPS(Pixel_PosColor input)
+vertex main_vs(vertex input)
 {
-    PixelOutputType output;
+    input.position.w = 1.0f;
+    input.position   = mul(input.position, buffer_pass.transform);
+    input.position   = mul(input.position, buffer_frame.view_projection_unjittered);
+    
+    return input;
+}
 
-    output.color              = input.color;
-    output.fsr2_reactive_mask = output.color.a;
-
-    return output;
+float4 main_ps(vertex input) : SV_TARGET
+{
+    return input.color;
 }

@@ -33,17 +33,18 @@ namespace Spartan
 {
     enum RHI_Texture_Flags : uint32_t
     {
-        RHI_Texture_Srv          = 1U << 0,
-        RHI_Texture_Uav          = 1U << 1,
-        RHI_Texture_Rtv          = 1U << 2,
-        RHI_Texture_ClearBlit    = 1U << 3,
-        RHI_Texture_PerMipViews  = 1U << 4,
-        RHI_Texture_Greyscale    = 1U << 5,
-        RHI_Texture_Transparent  = 1U << 6,
-        RHI_Texture_Srgb         = 1U << 7,
-        RHI_Texture_Mips         = 1U << 8,
-        RHI_Texture_Compressed   = 1U << 9,
-        RHI_Texture_Mappable     = 1U << 10
+        RHI_Texture_Srv             = 1U << 0,
+        RHI_Texture_Uav             = 1U << 1,
+        RHI_Texture_Rtv             = 1U << 2,
+        RHI_Texture_Vrs             = 1U << 3,
+        RHI_Texture_ClearBlit       = 1U << 4,
+        RHI_Texture_PerMipViews     = 1U << 5,
+        RHI_Texture_Greyscale       = 1U << 6,
+        RHI_Texture_Transparent = 1U << 7,
+        RHI_Texture_Srgb            = 1U << 8,
+        RHI_Texture_Mappable        = 1U << 9,
+        RHI_Texture_KeepData        = 1U << 10,
+        RHI_Texture_DontCompress    = 1U << 11
     };
 
     enum RHI_Shader_View_Type : uint8_t
@@ -95,6 +96,8 @@ namespace Spartan
         // misc
         std::shared_ptr<RHI_Texture> GetSharedPtr() { return shared_from_this(); }
         void SaveAsImage(const std::string& file_path);
+        static bool IsCompressedFormat(const RHI_Format format);
+        static size_t CalculateMipSize(uint32_t width, uint32_t height, RHI_Format format, uint32_t bits_per_channel, uint32_t channel_count);
 
         // data
         uint32_t GetArrayLength()                          const { return m_array_length; }
@@ -106,15 +109,15 @@ namespace Spartan
         RHI_Texture_Slice& GetSlice(const uint32_t array_index);
 
         // flags
-        bool IsSrv()                      const { return m_flags & RHI_Texture_Srv; }
-        bool IsUav()                      const { return m_flags & RHI_Texture_Uav; }
-        bool IsRenderTarget()             const { return m_flags & RHI_Texture_Rtv; }
-        bool IsRenderTargetDepthStencil() const { return IsRenderTarget() && IsDepthStencilFormat(); }
-        bool IsRenderTargetColor()        const { return IsRenderTarget() && IsColorFormat(); }
-        bool HasPerMipViews()             const { return m_flags & RHI_Texture_PerMipViews; }
-        bool HasMips()                    const { return m_flags & RHI_Texture_Mips; }
-        bool IsGrayscale()                const { return m_flags & RHI_Texture_Greyscale; }
-        bool IsTransparent()              const { return m_flags & RHI_Texture_Transparent; }
+        bool IsSrv()             const { return m_flags & RHI_Texture_Srv; }
+        bool IsUav()             const { return m_flags & RHI_Texture_Uav; }
+        bool IsVrs()             const { return m_flags & RHI_Texture_Vrs; }
+        bool IsRt()              const { return m_flags & RHI_Texture_Rtv; }
+        bool IsDsv()             const { return IsRt() && IsDepthStencilFormat(); }
+        bool IsRtv()             const { return IsRt() && IsColorFormat(); }
+        bool HasPerMipViews()    const { return m_flags & RHI_Texture_PerMipViews; }
+        bool IsGrayscale()       const { return m_flags & RHI_Texture_Greyscale; }
+        bool IsSemiTransparent() const { return m_flags & RHI_Texture_Transparent; }
 
         // format type
         bool IsDepthFormat()        const { return m_format == RHI_Format::D16_Unorm || m_format == RHI_Format::D32_Float || m_format == RHI_Format::D32_Float_S8X24_Uint; }
@@ -130,7 +133,7 @@ namespace Spartan
         // viewport
         const auto& GetViewport() const { return m_viewport; }
 
-        // gpu resources
+        // rhi
         void*& GetRhiResource()                             { return m_rhi_resource; }
         void* GetRhiSrv()                             const { return m_rhi_srv; }
         void* GetRhiUav()                             const { return m_rhi_uav; }
@@ -144,7 +147,6 @@ namespace Spartan
 
     protected:
         bool RHI_CreateResource();
-        void RHI_SetLayout(const RHI_Image_Layout new_layout, RHI_CommandList* cmd_list, const uint32_t mip_index, const uint32_t mip_range);
 
         uint32_t m_bits_per_channel = 0;
         uint32_t m_width            = 0;

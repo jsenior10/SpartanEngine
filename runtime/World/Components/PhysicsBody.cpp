@@ -136,8 +136,6 @@ namespace Spartan
         {
             m_shape_type = PhysicsShape::Terrain;
         }
-
-        UpdateShape();
     }
 
     PhysicsBody::~PhysicsBody()
@@ -184,7 +182,10 @@ namespace Spartan
             }
         }
 
-        m_car->Tick();
+        if (m_body_type == PhysicsBodyType::Vehicle)
+        {
+            m_car->Tick();
+        }
     }
 
     void PhysicsBody::Serialize(FileStream* stream)
@@ -576,7 +577,7 @@ namespace Spartan
 
         if (m_body_type == PhysicsBodyType::Vehicle)
         {
-            m_car->Create(rigid_body);
+            m_car->Create(rigid_body, m_entity_ptr);
         }
 
         // set flags
@@ -803,9 +804,9 @@ namespace Spartan
         {
             // get renderable
             renderable = GetEntity()->GetComponent<Renderable>();
-            if (!renderable)
+            if (!renderable || !renderable->HasMesh())
             {
-                SP_LOG_WARNING("For a mesh shape to be constructed, there needs to be a Renderable component");
+                SP_LOG_WARNING("For a mesh shape to be constructed, there needs to be a Renderable component with a mesh");
                 return;
             }
 

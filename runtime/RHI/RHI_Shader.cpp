@@ -32,63 +32,12 @@ using namespace std;
 
 namespace Spartan
 {
-    namespace
-    {
-        static void log_compilation_result(
-            const RHI_Shader_Stage shader_stage,
-            const unordered_map<string, string>& defines,
-            const RHI_ShaderCompilationState compilation_state,
-            const string& object_name,
-            const Stopwatch& stopwatch
-        )
-        {
-            string type_str = "unknown";
-            type_str = (shader_stage & RHI_Shader_Vertex)  ? "vertex"  : type_str;
-            type_str = (shader_stage & RHI_Shader_Pixel)   ? "pixel"   : type_str;
-            type_str = (shader_stage & RHI_Shader_Compute) ? "compute" : type_str;
-
-            string defines_str;
-            for (const auto& define : defines)
-            {
-                if (!defines_str.empty())
-                    defines_str += ", ";
-
-                defines_str += define.first + " = " + define.second;
-            }
-
-            // success
-            if (compilation_state == RHI_ShaderCompilationState::Succeeded)
-            {
-                if (defines_str.empty())
-                {
-                    SP_LOG_INFO("Successfully compiled %s shader \"%s\" in %.2f ms.", type_str.c_str(), object_name.c_str(), stopwatch.GetElapsedTimeMs());
-                }
-                else
-                {
-                    SP_LOG_INFO("Successfully compiled %s shader \"%s\" with definitions \"%s\" in %.2f ms.", type_str.c_str(), object_name.c_str(), defines_str.c_str(), stopwatch.GetElapsedTimeMs());
-                }
-            }
-            // failure
-            else
-            {
-                if (defines_str.empty())
-                {
-                    SP_LOG_ERROR("Failed to compile shader \"%s\".", object_name.c_str());
-                }
-                else
-                {
-                    SP_LOG_ERROR("Failed to compile shader \"%s\" with definitions \"%s\".", object_name.c_str(), defines_str.c_str());
-                }
-            }
-        }
-    }
-
-    RHI_Shader::RHI_Shader() : SpObject()
+    RHI_Shader::RHI_Shader() : SpartanObject()
     {
 
     }
 
-    void RHI_Shader::Compile(const RHI_Shader_Stage shader_type, const string& file_path, bool async, const RHI_Vertex_Type vertex_type)
+    void RHI_Shader::Compile(const RHI_Shader_Type shader_type, const string& file_path, bool async, const RHI_Vertex_Type vertex_type)
     {
         // clear in case of re-compilation
         m_descriptors.clear();
@@ -96,7 +45,7 @@ namespace Spartan
 
         m_shader_type = shader_type;
         m_vertex_type = vertex_type;
-        if (m_shader_type == RHI_Shader_Vertex)
+        if (m_shader_type == RHI_Shader_Type::Vertex)
         {
             m_input_layout = make_shared<RHI_InputLayout>();
         }
@@ -114,7 +63,7 @@ namespace Spartan
         {
             m_compilation_state = RHI_ShaderCompilationState::Idle;
 
-            if (!async)
+            auto compile = [this, shader_type, async]()
             {
                 // time compilation
                 const Stopwatch timer;
@@ -124,24 +73,36 @@ namespace Spartan
                 m_rhi_resource      = RHI_Compile();
                 m_compilation_state = m_rhi_resource ? RHI_ShaderCompilationState::Succeeded : RHI_ShaderCompilationState::Failed;
 
-                // log compilation result
-                log_compilation_result(shader_type, m_defines, m_compilation_state, m_object_name, timer);
+                // log failure
+                if (m_compilation_state != RHI_ShaderCompilationState::Succeeded)
+                {
+                    string defines_str;
+                    for (const auto& define : m_defines)
+                    {
+                        if (!defines_str.empty())
+                            defines_str += ", ";
+
+                        defines_str += define.first + " = " + define.second;
+                    }
+              
+                    if (defines_str.empty())
+                    {
+                        SP_LOG_ERROR("Failed to compile shader \"%s\".", m_object_name.c_str());
+                    }
+                    else
+                    {
+                        SP_LOG_ERROR("Failed to compile shader \"%s\" with definitions \"%s\".", m_object_name.c_str(), defines_str.c_str());
+                    }
+                }
+            };
+
+            if (async)
+            {
+                ThreadPool::AddTask(compile);
             }
             else
             {
-                ThreadPool::AddTask([this, shader_type]()
-                {
-                    // time compilation
-                    const Stopwatch timer;
-
-                    // compile
-                    m_compilation_state = RHI_ShaderCompilationState::Compiling;
-                    m_rhi_resource      = RHI_Compile();
-                    m_compilation_state = m_rhi_resource ? RHI_ShaderCompilationState::Succeeded : RHI_ShaderCompilationState::Failed;
-
-                    // log compilation result
-                    log_compilation_result(shader_type, m_defines, m_compilation_state, m_object_name, timer);
-                });
+                compile();
             }
         }
     }
@@ -160,48 +121,48 @@ namespace Spartan
             return;
         }
 
-        // Load source
+        // load source
         ifstream in(file_path);
         stringstream buffer;
         buffer << in.rdbuf();
         string source = buffer.str();
         
-        // Go through every line
+        // go through every line
         istringstream stream(source);
         string source_line;
         while (getline(stream, source_line))
         {
-            // Add the line to the preprocessed source
+            // add the line to the preprocessed source
             bool is_include_directive = source_line.find(include_directive_prefix) != string::npos;
             if (!is_include_directive)
             {
                 m_preprocessed_source += source_line + "\n";
             }
-            // If the line is an include directive, process it recursively
+            // if the line is an include directive, process it recursively
             else
             {
-                // Construct include file
+                // construct include file
                 string file_name         = FileSystem::GetStringBetweenExpressions(source_line, include_directive_prefix, "\"");
                 string include_file_path = FileSystem::GetDirectoryFromFilePath(file_path) + file_name;
 
-                // Process
+                // process
                 PreprocessIncludeDirectives(include_file_path);
             }
         }
 
-        // Save name
+        // save name
         m_names.emplace_back(FileSystem::GetFileNameFromFilePath(file_path));
 
-        // Save file path
+        // save file path
         m_file_paths.emplace_back(file_path);
 
-        // Save source
+        // save source
         m_sources.emplace_back(source);
     }
 
     void RHI_Shader::LoadFromDrive(const string& file_path)
     {
-        // Initialise a couple of things
+        // initialize a couple of things
         m_object_name = FileSystem::GetFileNameWithoutExtensionFromFilePath(file_path);
         m_file_path   = file_path;
         m_preprocessed_source.clear();
@@ -210,10 +171,10 @@ namespace Spartan
         m_sources.clear();
         m_file_paths_multiple.clear();
 
-        // Construct the source by recursively processing all include directives, starting from the actual file path.
+        // construct the source by recursively processing all include directives, starting from the actual file path.
         PreprocessIncludeDirectives(file_path);
 
-        // Update hash
+        // update hash
         {
             hash<string> hasher;
             m_hash = 0;
@@ -225,8 +186,8 @@ namespace Spartan
             }
         }
 
-        // Reverse the vectors so they have the main shader before the subsequent include directives.
-        // This also helps with the editor's shader editor where you are interested more in the first source.
+        // reverse the vectors so they have the main shader before the subsequent include directives.
+        // this also helps with the editor's shader editor where you are interested more in the first source.
         reverse(m_names.begin(), m_names.end());
         reverse(m_file_paths.begin(), m_file_paths.end());
         reverse(m_sources.begin(), m_sources.end());
@@ -250,19 +211,28 @@ namespace Spartan
 
     const char* RHI_Shader::GetEntryPoint() const
     {
-        if (m_shader_type == RHI_Shader_Vertex)  return "mainVS";
-        if (m_shader_type == RHI_Shader_Pixel)   return "mainPS";
-        if (m_shader_type == RHI_Shader_Compute) return "mainCS";
-
-        return nullptr;
+        switch (m_shader_type)
+        {
+            case RHI_Shader_Type::Vertex:  return "main_vs";
+            case RHI_Shader_Type::Hull:    return "main_hs";
+            case RHI_Shader_Type::Domain:  return "main_ds";
+            case RHI_Shader_Type::Pixel:   return "main_ps";
+            case RHI_Shader_Type::Compute: return "main_cs";
+            default:                       return nullptr;
+        }
     }
 
     const char* RHI_Shader::GetTargetProfile() const
     {
-        if (m_shader_type == RHI_Shader_Vertex)  return "vs_6_8";
-        if (m_shader_type == RHI_Shader_Pixel)   return "ps_6_8";
-        if (m_shader_type == RHI_Shader_Compute) return "cs_6_8";
-
-        return nullptr;
+        switch (m_shader_type)
+        {
+            case RHI_Shader_Type::Vertex:  return "vs_6_8";
+            case RHI_Shader_Type::Hull:    return "hs_6_8";
+            case RHI_Shader_Type::Domain:  return "ds_6_8";
+            case RHI_Shader_Type::Pixel:   return "ps_6_8";
+            case RHI_Shader_Type::Compute: return "cs_6_8";
+            default:                       return nullptr;
+        }
     }
+
 }

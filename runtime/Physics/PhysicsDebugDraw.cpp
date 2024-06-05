@@ -47,9 +47,18 @@ namespace Spartan
             DBG_DrawConstraintLimits;
     }
 
-    void PhysicsDebugDraw::drawLine(const btVector3& from, const btVector3& to, const btVector3& fromColor, const btVector3& toColor)
+    void PhysicsDebugDraw::drawLine(const btVector3& from, const btVector3& to, const btVector3& color_from, const btVector3& color_to)
     {
-        Renderer::DrawLine(ToVector3(from), ToVector3(to), ToVector4(fromColor), ToVector4(toColor), 0.0f, true);
+        // a bit dangerous to reinterpret these parameters but this is a performance critical path
+        // a better way would be to use a custom physics debug draw since the one from Bullet is a cpu hog
+        Renderer::DrawLine(
+            reinterpret_cast<const Math::Vector3&>(from),
+            reinterpret_cast<const Math::Vector3&>(to),
+            reinterpret_cast<const Color&>(color_from),
+            reinterpret_cast<const Color&>(color_to),
+            0.0f,
+            true
+        );
     }
 
     void PhysicsDebugDraw::drawContactPoint(const btVector3& PointOnB, const btVector3& normalOnB, btScalar distance, int lifeTime, const btVector3& color)

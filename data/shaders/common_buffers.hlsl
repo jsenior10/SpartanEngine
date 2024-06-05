@@ -39,7 +39,7 @@ struct FrameBufferData
     float2 taa_jitter_current;
     float2 taa_jitter_previous;
     
-    float time;
+    float directional_light_intensity;
     float delta_time;
     uint frame;
     uint options;
@@ -50,12 +50,16 @@ struct FrameBufferData
     float3 camera_direction;
     float camera_far;
 
-    float gamma;
     float camera_last_movement_time;
-    float2 padding_1;
+    float hdr_enabled;
+    float hdr_max_nits;
+    float hdr_white_point;
 
     float3 camera_position_previous;
-    uint material_index;
+    float resolution_scale;
+    
+    double time;
+    float2 padding;
 };
 
 // 128 byte push constant buffer used by everything in the engine
@@ -76,13 +80,14 @@ bool is_ssgi_enabled() { return buffer_frame.options & uint(1U << 1); }
 
 // easy access to the push constant properties
 matrix pass_get_transform_previous() { return buffer_pass.values; }
-float2 pass_get_resolution_in()      { return float2(buffer_pass.values._m03, buffer_pass.values._m22); }
-float2 pass_get_resolution_out()     { return float2(buffer_pass.values._m23, buffer_pass.values._m30); }
+float2 pass_get_f2_value()           { return float2(buffer_pass.values._m23, buffer_pass.values._m30); }
 float3 pass_get_f3_value()           { return float3(buffer_pass.values._m00, buffer_pass.values._m01, buffer_pass.values._m02); }
 float3 pass_get_f3_value2()          { return float3(buffer_pass.values._m20, buffer_pass.values._m21, buffer_pass.values._m31); }
-float4 pass_get_f4_value()           { return float4(buffer_pass.values._m10, buffer_pass.values._m11, buffer_pass.values._m12, buffer_pass.values._m13); }
-bool pass_is_transparent()           { return buffer_pass.values._m33; }
-bool pass_is_opaque()                { return !pass_is_transparent(); }
+float4 pass_get_f4_value()           { return float4(buffer_pass.values._m10, buffer_pass.values._m11, buffer_pass.values._m12, buffer_pass.values._m33); }
+
+uint pass_get_material_index() { return buffer_pass.values._m03; }
+bool pass_is_transparent()     { return buffer_pass.values._m13 == 1.0f; }
+bool pass_is_opaque()          { return !pass_is_transparent(); }
 // _m32 is available for use
 
 #endif // SPARTAN_COMMON_BUFFERS

@@ -33,6 +33,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../Resource/Import/FontImporter.h"
 #include "../Resource/Import/ModelImporter.h"
 #include "../Resource/Import/ImageImporterExporter.h"
+#include "../Display/Display.h"
 //===================================================
 
 //= NAMESPACES ===============
@@ -44,24 +45,39 @@ namespace Spartan
 {
     namespace
     {
+        vector<string> arguments;
         uint32_t flags = 0;
+
+        void write_ci_test_file(const uint32_t value)
+        {
+            if (Engine::HasArgument("-ci_test"))
+            {
+                ofstream file("ci_test.txt"); 
+                if (file.is_open())
+                {
+                    file << value;
+                    file.close();
+                }
+            }
+        }
     }
 
-    void Engine::Initialize()
+    void Engine::Initialize(const vector<string>& args)
     {
-        AddFlag(EngineMode::Editor);
-        AddFlag(EngineMode::Physics);
-        AddFlag(EngineMode::Game);
+        arguments = args;
 
-        // initialize systems
+        SetFlag(EngineMode::Editor, true);
+        SetFlag(EngineMode::Physics, true);
+        SetFlag(EngineMode::Game, true);
+
         Stopwatch timer_initialize;
         {
             Log::Initialize();
-            Settings::Initialize();
             FontImporter::Initialize();
             ImageImporterExporter::Initialize();
             ModelImporter::Initialize();
             Window::Initialize();
+            Display::Initialize();
             Timer::Initialize();
             Input::Initialize();
             ThreadPool::Initialize();
@@ -71,12 +87,11 @@ namespace Spartan
             Physics::Initialize();
             Renderer::Initialize();
             World::Initialize();
-
-            // post
-            Settings::PostInitialize();
+            Settings::Initialize();
         }
 
         SP_LOG_INFO("Initialization took %.1f ms", timer_initialize.GetElapsedTimeMs());
+        SP_SUBSCRIBE_TO_EVENT(EventType::RendererOnFirstFrameCompleted, SP_EVENT_HANDLER_EXPRESSION_STATIC(write_ci_test_file(0);));
     }
 
     void Engine::Shutdown()
@@ -114,17 +129,6 @@ namespace Spartan
         // post-tick
         Timer::PostTick();
         Profiler::PostTick();
-        Renderer::PostTick();
-    }
-
-    void Engine::AddFlag(const EngineMode flag)
-    {
-        flags |= static_cast<uint32_t>(flag);
-    }
-
-    void Engine::RemoveFlag(const EngineMode flag)
-    {
-        flags &= ~static_cast<uint32_t>(flag);
     }
 
     bool Engine::IsFlagSet(const EngineMode flag)
@@ -132,8 +136,24 @@ namespace Spartan
         return flags & static_cast<uint32_t>(flag);
     }
 
+    void Engine::SetFlag(const EngineMode flag, const bool enabled)
+    {
+        enabled ? (flags |= static_cast<uint32_t>(flag)) : (flags &= ~static_cast<uint32_t>(flag));
+    }
+
     void Engine::ToggleFlag(const EngineMode flag)
     {
-        IsFlagSet(flag) ? RemoveFlag(flag) : AddFlag(flag);
+        IsFlagSet(flag) ? (flags &= ~static_cast<uint32_t>(flag)) : (flags |= static_cast<uint32_t>(flag));
+    }
+
+    bool Engine::HasArgument(const string& argument)
+    {
+        for (const auto& arg : arguments)
+        {
+            if (arg == argument)
+                return true;
+        }
+
+        return false;
     }
 }

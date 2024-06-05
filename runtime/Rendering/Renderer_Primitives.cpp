@@ -42,7 +42,7 @@ namespace Spartan
         uint32_t m_lines_index_depth_on  = 0;
     }
 
-    void Renderer::DrawLine(const Vector3& from, const Vector3& to, const Vector4& color_from, const Vector4& color_to, const float duration /*= 0.0f*/, const bool depth /*= true*/)
+    void Renderer::DrawLine(const Vector3& from, const Vector3& to, const Color& color_from, const Color& color_to, const float duration /*= 0.0f*/, const bool depth /*= true*/)
     {
         // get vertex index
         uint32_t& index = depth ? m_lines_index_depth_on : m_lines_index_depth_off;
@@ -72,23 +72,37 @@ namespace Spartan
         // write lines
         {
             index++;
-            m_line_vertices[index]  = RHI_Vertex_PosCol(from, color_from);
-            m_lines_duration[index] = duration;
+            RHI_Vertex_PosCol& line_start = m_line_vertices[index];
+            line_start.pos[0]             = from.x;
+            line_start.pos[1]             = from.y;
+            line_start.pos[2]             = from.z;
+            line_start.col[0]             = color_from.r;
+            line_start.col[1]             = color_from.g;
+            line_start.col[2]             = color_from.b;
+            line_start.col[3]             = 1.0f;
+            m_lines_duration[index]       = duration;
 
             index++;
-            m_line_vertices[index]  = RHI_Vertex_PosCol(to, color_to);
-            m_lines_duration[index] = duration;
+            RHI_Vertex_PosCol& line_end = m_line_vertices[index];
+            line_end.pos[0]             = to.x;
+            line_end.pos[1]             = to.y;
+            line_end.pos[2]             = to.z;
+            line_end.col[0]             = color_to.r;
+            line_end.col[1]             = color_to.g;
+            line_end.col[2]             = color_to.b;
+            line_end.col[3]             = 1.0f;
+            m_lines_duration[index]     = duration;
         }
     }
 
-    void Renderer::DrawTriangle(const Vector3& v0, const Vector3& v1, const Vector3& v2, const Vector4& color /*= DEBUG_COLOR*/, const float duration /*= 0.0f*/, bool depth /*= true*/)
+    void Renderer::DrawTriangle(const Vector3& v0, const Vector3& v1, const Vector3& v2, const Color& color /*= DEBUG_COLOR*/, const float duration /*= 0.0f*/, bool depth /*= true*/)
     {
         DrawLine(v0, v1, color, color, duration, depth);
         DrawLine(v1, v2, color, color, duration, depth);
         DrawLine(v2, v0, color, color, duration, depth);
     }
 
-    void Renderer::DrawBox(const BoundingBox& box, const Vector4& color, const float duration /*= 0.0f*/, const bool depth /*= true*/)
+    void Renderer::DrawBox(const BoundingBox& box, const Color& color, const float duration /*= 0.0f*/, const bool depth /*= true*/)
     {
         const Vector3& min = box.GetMin();
         const Vector3& max = box.GetMax();
@@ -107,7 +121,7 @@ namespace Spartan
         DrawLine(Vector3(min.x, max.y, max.z), Vector3(min.x, min.y, max.z), color, color, duration, depth);
     }
 
-    void Renderer::DrawCircle(const Vector3& center, const Vector3& axis, const float radius, uint32_t segment_count, const Vector4& color /*= DEBUG_COLOR*/, const float duration /*= 0.0f*/, const bool depth /*= true*/)
+    void Renderer::DrawCircle(const Vector3& center, const Vector3& axis, const float radius, uint32_t segment_count, const Color& color /*= DEBUG_COLOR*/, const float duration /*= 0.0f*/, const bool depth /*= true*/)
     {
         if (radius <= 0.0f)
             return;
@@ -145,7 +159,7 @@ namespace Spartan
         }
     }
 
-    void Renderer::DrawSphere(const Vector3& center, float radius, uint32_t segment_count, const Vector4& color /*= DEBUG_COLOR*/, const float duration /*= 0.0f*/, const bool depth /*= true*/)
+    void Renderer::DrawSphere(const Vector3& center, float radius, uint32_t segment_count, const Color& color /*= DEBUG_COLOR*/, const float duration /*= 0.0f*/, const bool depth /*= true*/)
     {
         // Need at least 4 segments
         segment_count = Helper::Max<uint32_t>(segment_count, 4);
@@ -190,7 +204,7 @@ namespace Spartan
         }
     }
 
-    void Renderer::DrawDirectionalArrow(const Vector3& start, const Vector3& end, float arrow_size, const Vector4& color /*= DEBUG_COLOR*/, const float duration /*= 0.0f*/, const bool depth /*= true*/)
+    void Renderer::DrawDirectionalArrow(const Vector3& start, const Vector3& end, float arrow_size, const Color& color /*= DEBUG_COLOR*/, const float duration /*= 0.0f*/, const bool depth /*= true*/)
     {
         arrow_size = Helper::Max<float>(0.1f, arrow_size);
 
@@ -217,7 +231,7 @@ namespace Spartan
         DrawLine(end, end + TM * Vector3(-arrow_sqrt, -arrow_sqrt, 0), color, color, duration, depth);
     }
 
-    void Renderer::DrawPlane(const Math::Plane& plane, const Math::Vector4& color /*= DEBUG_COLOR*/, const float duration /*= 0.0f*/, const bool depth /*= true*/)
+    void Renderer::DrawPlane(const Math::Plane& plane, const Color& color /*= DEBUG_COLOR*/, const float duration /*= 0.0f*/, const bool depth /*= true*/)
     {
         // Arrow indicating normal
         Vector3 plane_origin = plane.normal * plane.d;
@@ -232,13 +246,17 @@ namespace Spartan
 
     void Renderer::AddLinesToBeRendered()
     {
-        if (GetOption<bool>(Renderer_Option::Debug_PickingRay))
+        // only render debug lines when not in game mode
+        if (Engine::IsFlagSet(EngineMode::Game))
+            return;
+
+        if (GetOption<bool>(Renderer_Option::PickingRay))
         {
             const auto& ray = GetCamera()->GetPickingRay();
-            DrawLine(ray.GetStart(), ray.GetStart() + ray.GetDirection() * GetCamera()->GetFarPlane(), Vector4(0, 1, 0, 1));
+            DrawLine(ray.GetStart(), ray.GetStart() + ray.GetDirection() * GetCamera()->GetFarPlane(), Color(0, 1, 0, 1));
         }
         
-        if (GetOption<bool>(Renderer_Option::Debug_Lights))
+        if (GetOption<bool>(Renderer_Option::Lights))
         {
             auto& lights = GetEntities()[Renderer_Entity::Light];
             for (const auto& entity : lights)
@@ -289,24 +307,33 @@ namespace Spartan
             }
         }
         
-        if (GetOption<bool>(Renderer_Option::Debug_Aabb))
+        if (GetOption<bool>(Renderer_Option::Aabb))
         {
-            static const Vector4 color_visible  = Vector4(0.41f, 0.86f, 1.0f, 1.0f);
-            static const Vector4 color_occluded = Vector4(01.0f, 0.0f, 0.0f, 1.0f);
+            auto get_color = [](shared_ptr<Renderable>& renderable)
+            {
+                static const Color color_visible        = Color::standard_renderer_lines;
+                static const Color color_occluded       = Color(1.0f, 0.0f, 0.0f, 1.0f);
+                static const Color color_ignore_culling = Color(1.0f, 1.0f, 0.0f, 1.0f);
 
-            auto draw_bounding_boxes = [](const Renderer_Entity entity_type)
+                Color color = color_visible;
+                color       = !renderable->IsVisible() ? color_occluded : color;
+
+                return color;
+            };
+
+            auto draw_bounding_boxes = [&get_color](const Renderer_Entity entity_type)
             {
                 for (const auto& entity : GetEntities()[entity_type])
                 {
                     if (auto renderable = entity->GetComponent<Renderable>())
                     {
                         BoundingBoxType bounding_box_type = renderable->HasInstancing() ? BoundingBoxType::TransformedInstances : BoundingBoxType::Transformed;
-                        DrawBox(renderable->GetBoundingBox(bounding_box_type), renderable->IsVisible() ? color_visible : color_occluded);
+                        DrawBox(renderable->GetBoundingBox(bounding_box_type), get_color(renderable));
                     }
                 }
             };
             
-            auto draw_instance_group_bounding_boxes = [&](const Renderer_Entity entity_type)
+            auto draw_instance_group_bounding_boxes = [&get_color](const Renderer_Entity entity_type)
             {
                 for (const auto& entity : GetEntities()[entity_type])
                 {
@@ -316,16 +343,14 @@ namespace Spartan
                         for (uint32_t group_index = 0; group_index < group_count; group_index++)
                         {
                             const BoundingBox& bounding_box_group = renderable->GetBoundingBox(BoundingBoxType::TransformedInstanceGroup, group_index);
-                            DrawBox(bounding_box_group, renderable->IsVisible() ? color_visible : color_occluded);
+                            DrawBox(bounding_box_group, get_color(renderable));
                         }
                     }
                 }
             };
 
-            draw_bounding_boxes(Renderer_Entity::Geometry);
-            draw_bounding_boxes(Renderer_Entity::GeometryTransparent);
-            draw_instance_group_bounding_boxes(Renderer_Entity::GeometryInstanced);
-            draw_instance_group_bounding_boxes(Renderer_Entity::GeometryTransparentInstanced);
+            draw_bounding_boxes(Renderer_Entity::Mesh);
+            draw_instance_group_bounding_boxes(Renderer_Entity::Mesh);
         }
     }
 }

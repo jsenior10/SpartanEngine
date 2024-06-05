@@ -97,14 +97,10 @@ namespace Spartan
 
     void RHI_DescriptorSetLayout::SetTexture(const uint32_t slot, RHI_Texture* texture, const uint32_t mip_index, const uint32_t mip_range)
     {
-        bool mip_specified = mip_index != rhi_all_mips;
+        bool mip_specified      = mip_index != rhi_all_mips;
         RHI_Image_Layout layout = texture->GetLayout(mip_specified ? mip_index : 0);
 
-        // validate layout
-        SP_ASSERT(layout == RHI_Image_Layout::General || layout == RHI_Image_Layout::Shader_Read || layout == RHI_Image_Layout::Depth_Stencil_Read);
-
-        // validate type
-        SP_ASSERT(texture->IsSrv());
+        SP_ASSERT(layout == RHI_Image_Layout::General || layout == RHI_Image_Layout::Shader_Read || layout == RHI_Image_Layout::Shader_Read_Depth);
 
         for (RHI_Descriptor& descriptor : m_descriptors)
         {

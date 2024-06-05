@@ -23,41 +23,38 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define SPARTAN_COMMON
 
 //= INCLUDES ==========================
-#include "common_vertex_pixel.hlsl"
 #include "common_buffers.hlsl"
 #include "common_samplers.hlsl"
 #include "common_textures_storage.hlsl"
+#include "common_colorspace.hlsl"
 //=====================================
 
 /*------------------------------------------------------------------------------
     CONSTANTS
 ------------------------------------------------------------------------------*/
-static const float PI                  = 3.14159265f;
-static const float PI2                 = 6.28318530f;
-static const float PI4                 = 12.5663706f;
-static const float INV_PI              = 0.31830988f;
-static const float PI_HALF             = PI * 0.5f;
-static const float FLT_MIN             = 0.00000001f;
-static const float FLT_MAX_10          = 511.0f;
-static const float FLT_MAX_11          = 1023.0f;
-static const float FLT_MAX_14          = 8191.0f;
-static const float FLT_MAX_16          = 32767.0f;
-static const float FLT_MAX_16U         = 65535.0f;
-static const float RPC_9               = 0.11111111111f;
-static const float RPC_16              = 0.0625f;
-static const float RPC_32              = 0.03125f;
-static const uint THREAD_GROUP_COUNT_X = 8;
-static const uint THREAD_GROUP_COUNT_Y = 8;
-static const uint THREAD_GROUP_COUNT   = 64;
-
+static const float PI                   = 3.14159265f;
+static const float PI2                  = 6.28318530f;
+static const float PI4                  = 12.5663706f;
+static const float INV_PI               = 0.31830988f;
+static const float PI_HALF              = PI * 0.5f;
+static const float FLT_MIN              = 0.00000001f;
+static const float FLT_MAX_10           = 511.0f;
+static const float FLT_MAX_11           = 1023.0f;
+static const float FLT_MAX_14           = 8191.0f;
+static const float FLT_MAX_16           = 32767.0f;
+static const float FLT_MAX_16U          = 65535.0f;
+static const float RPC_9                = 0.11111111111f;
+static const float RPC_16               = 0.0625f;
+static const float RPC_32               = 0.03125f;
+static const uint  THREAD_GROUP_COUNT_X = 8;
+static const uint  THREAD_GROUP_COUNT_Y = 8;
+static const uint  THREAD_GROUP_COUNT   = 64;
+static const float DEG_TO_RAD           = PI / 180.0f;
 /*------------------------------------------------------------------------------
    COMMON
 ------------------------------------------------------------------------------*/
-float2 get_rt_texel_size()          { return float2(1.0f / pass_get_resolution_out().x, 1.0f /pass_get_resolution_out().y); }
 float2 get_tex_noise_normal_scale() { return float2(buffer_frame.resolution_render.x / 256.0f, buffer_frame.resolution_render.y / 256.0f); }
 float2 get_tex_noise_blue_scale()   { return float2(buffer_frame.resolution_render.x / 470.0f, buffer_frame.resolution_render.y / 470.0f); }
-float3 degamma(float3 color)        { return pow(color, buffer_frame.gamma); }
-float3 gamma(float3 color)          { return pow(color, 1.0f / buffer_frame.gamma); }
 
 /*------------------------------------------------------------------------------
     MATH
@@ -91,6 +88,11 @@ float pow4(float x)
 }
 
 bool is_valid_uv(float2 value) { return (value.x >= 0.0f && value.x <= 1.0f) && (value.y >= 0.0f && value.y <= 1.0f); }
+
+static const matrix matrix_identity = {1, 0, 0, 0,
+                                       0, 1, 0, 0,
+                                       0, 0, 1, 0,
+                                       0, 0, 0, 1};
 
 /*------------------------------------------------------------------------------
     SATURATE
@@ -164,8 +166,8 @@ float fast_sqrt(float x)
 
 float fast_length(float3 v)
 {
-    float LengthSqr = dot(v, v);
-    return fast_sqrt(LengthSqr);
+    float length_squared = dot(v, v);
+    return fast_sqrt(length_squared);
 }
 
 float fast_sin(float x)
@@ -388,9 +390,9 @@ float3 get_view_direction(float2 uv)
     return get_view_direction(get_position(uv));
 }
 
-float3 get_view_direction(uint2 pos)
+float3 get_view_direction(uint2 pos, float2 resolution)
 {
-    const float2 uv = (pos + 0.5f) / pass_get_resolution_out();
+    const float2 uv = (pos + 0.5f) / resolution;
     return get_view_direction(uv);
 }
 
@@ -399,9 +401,9 @@ float3 get_view_direction_view_space(float2 uv)
     return mul(float4(get_view_direction(get_position(uv)), 0.0f), buffer_frame.view).xyz;
 }
 
-float3 get_view_direction_view_space(uint2 pos)
+float3 get_view_direction_view_space(uint2 pos, float2 resolution)
 {
-    const float2 uv = (pos + 0.5f) / pass_get_resolution_out();
+    const float2 uv = (pos + 0.5f) / resolution;
     return get_view_direction_view_space(uv);
 }
 
@@ -418,27 +420,6 @@ float2 direction_sphere_uv(float3 direction)
     float u = 0.5f + atan2(direction.z, direction.x) / PI2;
     float v = 0.5f - asin(direction.y) / PI;
     return float2(u, v);
-}
-
-uint direction_to_cube_face_index(const float3 direction)
-{
-    // find the absolute values of the direction components
-    float3 abs_direction = abs(direction);
-
-    // identify which component is the greatest
-    float max_component = max(max(abs_direction.x, abs_direction.y), abs_direction.z);
-
-    // determine the cube face index based on the greatest component and its sign
-    if (max_component == abs_direction.x)
-        return (direction.x > 0.0f) ? 0 : 1;
-
-    if (max_component == abs_direction.y)
-        return (direction.y > 0.0f) ? 2 : 3;
-
-    if (max_component == abs_direction.z)
-        return (direction.z > 0.0f) ? 4 : 5;
-
-    return 0;
 }
 
 /*------------------------------------------------------------------------------
@@ -510,42 +491,27 @@ float microw_shadowing_cod(float n_dot_l, float visibility)
     return microShadow * microShadow;
 }
 
-/*------------------------------------------------------------------------------
-    PRIMITIVES
-------------------------------------------------------------------------------*/
-float draw_line(float2 p1, float2 p2, float2 uv, float a)
+float3 project_onto_paraboloid(float3 light_to_vertex_view, float near_plane, float far_plane)
 {
-    float r = 0.0f;
-    float one_px = 1. / pass_get_resolution_out().x; // not really one px
+    float3 ndc = 0.0f;
 
-    // get dist between points
-    float d = distance(p1, p2);
+    // normalize the light to vertex vector
+    float d = length(light_to_vertex_view);
+    light_to_vertex_view /= d;
 
-    // get dist between current pixel and p1
-    float duv = distance(p1, uv);
+    // project onto paraboloid
+    ndc.xy = light_to_vertex_view.xy / (light_to_vertex_view.z + 1.0f);
 
-    // if point is on line, according to dist, it should match current uv 
-    r = 1.0f - floor(1.0f - (a * one_px) + distance(lerp(p1, p2, clamp(duv / d, 0.0f, 1.0f)), uv));
+     // calculate reverse depth
+    ndc.z = (far_plane - d) / (far_plane - near_plane);
 
-    return r;
-}
+    // if the vertex is behind the light, clamp it to the edge of the circular paraboloid
+    float is_valid       = step(0.0f, light_to_vertex_view.z);
+    float radius_squared = dot(ndc.xy, ndc.xy);
+    float clamped_radius = sqrt(clamp(radius_squared, 0.0f, 1.0f));
+    ndc.xy               = is_valid * ndc.xy + (1.0f - is_valid) * (ndc.xy / clamped_radius);
 
-float draw_line_view_space(float3 p1, float3 p2, float2 uv, float a)
-{
-    float2 p1_uv = view_to_uv(p1);
-    float2 p2_uv = view_to_uv(p2);
-    return draw_line(p1_uv, p2_uv, uv, a);
-}
-
-float draw_circle(float2 origin, float radius, float2 uv)
-{
-    return (distance(origin, uv) <= radius) ? 1.0f : 0.0f;
-}
-
-float draw_circle_view_space(float3 origin, float radius, float2 uv)
-{
-    float2 origin_uv = view_to_uv(origin);
-    return draw_circle(origin_uv, radius, uv);
+    return ndc;
 }
 
 /*------------------------------------------------------------------------------
@@ -669,9 +635,6 @@ float get_alpha_threshold(float3 world_position)
 //= INCLUDES ===========================
 #include "common_structs.hlsl"
 #include "common_vertex_processing.hlsl"
-#include "common_vertex_operations.hlsl"
 //======================================
 
 #endif // SPARTAN_COMMON
-
-

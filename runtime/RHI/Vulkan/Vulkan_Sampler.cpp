@@ -24,7 +24,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../RHI_Implementation.h"
 #include "../RHI_Sampler.h"
 #include "../RHI_Device.h"
-#include <cfloat>
 //================================
 
 namespace Spartan
@@ -48,7 +47,7 @@ namespace Spartan
         sampler_info.minLod              = 0.0f;
         sampler_info.maxLod              = FLT_MAX;
     
-        SP_VK_ASSERT_MSG(vkCreateSampler(RHI_Context::device, &sampler_info, nullptr, reinterpret_cast<VkSampler*>(&m_rhi_resource)), "Failed to create sampler");
+        SP_ASSERT_VK_MSG(vkCreateSampler(RHI_Context::device, &sampler_info, nullptr, reinterpret_cast<VkSampler*>(&m_rhi_resource)), "Failed to create sampler");
     }
 
     RHI_Sampler::~RHI_Sampler()

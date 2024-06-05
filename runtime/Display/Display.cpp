@@ -22,7 +22,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //= INCLUDES =======
 #include "pch.h"
 #include "Display.h"
-#include <SDL.h>
+#include <SDL/SDL.h>
 #include "Window.h"
 //==================
 
@@ -164,7 +164,7 @@ namespace Spartan
         });
     }
 
-    void Display::DetectDisplayModes()
+    void Display::Initialize()
     {
         display_modes.clear();
 

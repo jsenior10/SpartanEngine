@@ -80,7 +80,6 @@ namespace Spartan
 
         //= COMPONENT ================================
         void OnTick() override;
-        void OnTransformChanged() override;
         void Serialize(FileStream* stream) override;
         void Deserialize(FileStream* stream) override;
         //============================================
@@ -104,13 +103,11 @@ namespace Spartan
         void SetIntensity(const LightIntensity lumens);
         float GetIntensityLumens() const    { return m_intensity_lumens; }
         LightIntensity GetIntensity() const { return m_intensity; }
-        float GetIntensityWatt(Camera* camera) const;
+        float GetIntensityWatt() const;
 
         // bias
-        static float GetBias()            { return -0.0005f; } // small values to avoid disconnected shadows
-        static float GetBiasSlopeScaled() { return -2.0f; }
-        void SetNormalBias(float value)   { m_bias_normal = value; }
-        auto GetNormalBias() const        { return m_bias_normal; }
+        static float GetBias()            { return -0.002f; }
+        static float GetBiasSlopeScaled() { return -2.5f; }
 
         // range
         void SetRange(float range);
@@ -147,21 +144,19 @@ namespace Spartan
         float m_intensity_lumens   = 2600.0f;
 
         // shadows
-        float m_bias_normal = 0.0f;
         std::shared_ptr<RHI_Texture> m_texture_color;
         std::shared_ptr<RHI_Texture> m_texture_depth;
-        std::array<Math::Frustum, 6> m_frustums;
-        std::array<Math::Matrix, 6> m_matrix_view;
-        std::array<Math::Matrix, 6> m_matrix_projection;
+        std::array<Math::Frustum, 2> m_frustums;
+        std::array<Math::Matrix, 2> m_matrix_view;
+        std::array<Math::Matrix, 2> m_matrix_projection;
 
         // misc
-        uint32_t m_flags                     = 0;
-        LightType m_light_type               = LightType::Directional;
-        Color m_color_rgb                    = Color::standard_black;;
-        float m_temperature_kelvin           = 0.0f;
-        float m_range                        = 0.0f;
-        float m_angle_rad                    = Math::Helper::DEG_TO_RAD * 30.0f;
-        uint32_t m_index                     = 0;
-        Math::Vector3 m_camera_position_last = Math::Vector3::Infinity;
+        uint32_t m_flags           = 0;
+        LightType m_light_type     = LightType::Directional;
+        Color m_color_rgb          = Color::standard_black;;
+        float m_temperature_kelvin = 0.0f;
+        float m_range              = 0.0f;
+        float m_angle_rad          = Math::Helper::DEG_TO_RAD * 30.0f;
+        uint32_t m_index           = 0;
     };
 }

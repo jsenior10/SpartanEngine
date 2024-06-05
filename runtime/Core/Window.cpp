@@ -20,16 +20,17 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
 
-//= INCLUDES ==================
+//= INCLUDES =========================
 #include "pch.h"
 #include "Window.h"
 #include "../Input/Input.h"
 #include "../Display/Display.h"
+#include "../RHI/RHI_Implementation.h"
 SP_WARNINGS_OFF
-#include <SDL.h>
-#include <SDL_syswm.h>
+#include <SDL/SDL.h>
+#include <SDL/SDL_syswm.h>
 SP_WARNINGS_ON
-//=============================
+//====================================
 
 //= LINKING ============================
 #ifdef _MSC_VER
@@ -49,24 +50,24 @@ namespace Spartan
 {
     namespace
     { 
-        static std::string m_title;
-        static Math::Vector2 m_position = Math::Vector2::Zero;
-        static uint32_t width           = 640;
-        static uint32_t height          = 480;
-        static float dpi_scale          = 1.0f;
-        static bool close               = false;
-        static SDL_Window* window       = nullptr;
+        std::string m_title;
+        Math::Vector2 m_position = Math::Vector2::Zero;
+        uint32_t width           = 1280;
+        uint32_t height          = 720;
+        float dpi_scale          = 1.0f;
+        bool wants_to_close      = false;
+        SDL_Window* window       = nullptr;
 
         // splash-screen
-        static bool m_show_splash_screen              = true;
-        static SDL_Window* m_splash_sceen_window      = nullptr;
-        static SDL_Renderer* m_splash_screen_renderer = nullptr;
-        static SDL_Texture* m_splash_screen_texture   = nullptr;
+        bool m_show_splash_screen              = true;
+        SDL_Window* m_splash_sceen_window      = nullptr;
+        SDL_Renderer* m_splash_screen_renderer = nullptr;
+        SDL_Texture* m_splash_screen_texture   = nullptr;
     }
 
     void Window::Initialize()
     {
-        // Set the process to be per monitor DPI aware
+        // set the process to be per monitor DPI aware
         #ifdef _MSC_VER
         // User32.lib + dll, Windows 10 v1607+ (Creators Update)
         if (HMODULE user32 = LoadLibrary(TEXT("user32.dll")))
@@ -80,7 +81,7 @@ namespace Spartan
         }
         #endif
 
-        // Initialise video subsystem (if needed)
+        // initialise video subsystem (if needed)
         if (SDL_WasInit(SDL_INIT_VIDEO) != 1)
         {
             if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0)
@@ -90,7 +91,7 @@ namespace Spartan
             }
         }
 
-        // Initialise events subsystem (if needed)
+        // initialise events subsystem (if needed)
         if (SDL_WasInit(SDL_INIT_EVENTS) != 1)
         {
             if (SDL_InitSubSystem(SDL_INIT_EVENTS) != 0)
@@ -100,27 +101,28 @@ namespace Spartan
             }
         }
 
-        // Show a splash screen
+        // show a splash screen
         if (m_show_splash_screen)
         {
             CreateAndShowSplashScreen();
         }
 
-        // Set window flags
+        // set window flags
         uint32_t flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_MAXIMIZED;
+        if (RHI_Context::api_type == RHI_Api_Type::Vulkan)
+        {
+            flags |= SDL_WINDOW_VULKAN;
+        }
 
-        // If the swapchain surface is created using SDL_Vulkan_CreateSurface(), then the window needs this flag.
-        flags |= SDL_WINDOW_VULKAN;
-
-        // Create window
-        m_title  = "Spartan " + to_string(sp_info::version_major) + "." + to_string(sp_info::version_minor) + "." + to_string(sp_info::version_revision);
-        window = SDL_CreateWindow(
-            m_title.c_str(),         // window title
-            SDL_WINDOWPOS_UNDEFINED, // initial x position
-            SDL_WINDOWPOS_UNDEFINED, // initial y position
-            width,                   // width in pixels
-            height,                  // height in pixels
-            flags                    // flags - see below
+        // create window
+        m_title = "Spartan " + to_string(sp_info::version_major) + "." + to_string(sp_info::version_minor) + "." + to_string(sp_info::version_revision);
+        window  = SDL_CreateWindow(
+            m_title.c_str(), // window title
+            0,               // initial x position
+            0,               // initial y position
+            width,
+            height,
+            flags
         );
 
         if (!window)
@@ -131,36 +133,32 @@ namespace Spartan
 
         if (m_show_splash_screen)
         {
-            // Hide the window until the engine is able to present
+            // hide the window until the engine is able to present
             Hide();
 
-            // Show the window and destroy the splash screen, after the first frame has been rendered successfully
+            // show the window and destroy the splash screen, after the first frame has been rendered successfully
             SP_SUBSCRIBE_TO_EVENT(EventType::RendererOnFirstFrameCompleted, SP_EVENT_HANDLER_STATIC(OnFirstFrameCompleted));
         }
-
-
-        // Get the DPI scale - has to be done after window creation
+ 
+        // get the DPI scale - has to be done after window creation
         #ifdef _MSC_VER
         dpi_scale = static_cast<float>(GetDpiForWindow(static_cast<HWND>(GetHandleRaw()))) / 96.0f;
         #endif
 
-        // Register library
+        // register library
         string version = to_string(SDL_MAJOR_VERSION) + "." + to_string(SDL_MINOR_VERSION) + "." + to_string(SDL_PATCHLEVEL);
         Settings::RegisterThirdPartyLib("SDL", version, "https://www.libsdl.org/");
     }
 
     void Window::Shutdown()
     {
-        // Destroy window
         SDL_DestroyWindow(window);
-
-        // Shutdown SDL2
         SDL_Quit();
     }
 
     void Window::Tick()
     {
-        // Process events
+        // process events
         SDL_Event sdl_event;
         while (SDL_PollEvent(&sdl_event))
         {
@@ -194,32 +192,32 @@ namespace Spartan
                     case SDL_WINDOWEVENT_RESTORED:
                         break;
                     case SDL_WINDOWEVENT_ENTER:
-                        // Window has gained mouse focus
+                        // window has gained mouse focus
                         break;
                     case SDL_WINDOWEVENT_LEAVE:
-                        // Window has lost mouse focus
+                        // window has lost mouse focus
                         break;
                     case SDL_WINDOWEVENT_FOCUS_GAINED:
-                        // Window has gained keyboard focus
+                        // window has gained keyboard focus
                         break;
                     case SDL_WINDOWEVENT_FOCUS_LOST:
-                        // Window has lost keyboard focus
+                        // window has lost keyboard focus
                         break;
                     case SDL_WINDOWEVENT_CLOSE:
-                        close = true;
+                        wants_to_close = true;
                         break;
                     case SDL_WINDOWEVENT_TAKE_FOCUS:
-                        // Window is being offered a focus (should SetWindowInputFocus() on itself or a subwindow, or ignore)
+                        // window is being offered a focus (should SetWindowInputFocus() on itself or a subwindow, or ignore)
                         break;
                     case SDL_WINDOWEVENT_HIT_TEST:
-                        // Window had a hit test that wasn't SDL_HITTEST_NORMAL.
+                        // window had a hit test that wasn't SDL_HITTEST_NORMAL.
                         break;
                     case SDL_WINDOWEVENT_ICCPROF_CHANGED:
                         SP_LOG_INFO("The ICC profile of the window's display has changed");
                         break;
                     case SDL_WINDOWEVENT_DISPLAY_CHANGED:
                         SP_LOG_INFO("Display has been changed, detecting new display modes");
-                        Display::DetectDisplayModes();
+                        Display::Initialize();
                         break;
                     default:
                         SP_LOG_ERROR("Unhandled window event");
@@ -231,9 +229,9 @@ namespace Spartan
             SP_FIRE_EVENT_DATA(EventType::Sdl, &sdl_event);
         }
 
-        // Handle shortcuts
+        // handle shortcuts
 
-        // Toggle full screen
+        // toggle full screen
         if (Input::GetKey(KeyCode::Alt_Right) && Input::GetKeyDown(KeyCode::Enter))
         {
             ToggleFullScreen();
@@ -273,7 +271,7 @@ namespace Spartan
 
         if (was_windowed)
         {
-            Engine::RemoveFlag(EngineMode::Editor);
+            Engine::SetFlag(EngineMode::Editor, false);
             SP_FIRE_EVENT(EventType::WindowFullScreenToggled);
         }
     }
@@ -290,7 +288,7 @@ namespace Spartan
 
         if (was_fullscreen)
         {
-            Engine::AddFlag(EngineMode::Editor);
+            Engine::SetFlag(EngineMode::Editor, true);
             SP_FIRE_EVENT(EventType::WindowFullScreenToggled);
         }
     }
@@ -314,18 +312,26 @@ namespace Spartan
         SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
     }
 
-    void Window::Minimise()
+    void Window::Minimize()
     {
         SP_ASSERT(window != nullptr);
 
-        SDL_SetWindowFullscreen(window, SDL_WINDOW_MINIMIZED);
+        SDL_MinimizeWindow(window);
     }
 
-    void Window::Maximise()
+    void Window::Maximize()
     {
         SP_ASSERT(window != nullptr);
 
-        SDL_SetWindowFullscreen(window, SDL_WINDOW_MAXIMIZED);
+        Uint32 window_flags = SDL_GetWindowFlags(window);
+        if (window_flags & SDL_WINDOW_MAXIMIZED)
+        {
+            SDL_RestoreWindow(window);
+        }
+        else
+        {
+            SDL_MaximizeWindow(window);
+        }
     }
 
     void Window::SetSize(const uint32_t width, const uint32_t height)
@@ -374,19 +380,19 @@ namespace Spartan
             printf("Error: %s", SDL_GetError());
             return static_cast<void*>(nullptr);
         }
-#ifdef _WIN32
+        #ifdef _WIN32
         return static_cast<void*>(wmInfo.info.win.window);
-#elif __linux__
+        #elif __linux__
         return reinterpret_cast<void*>(wmInfo.info.x11.window);
-#endif
+        #endif
     }
 
-    bool Window::WantsToClose()
+    void Window::Close()
     {
-        return close;
+        wants_to_close = true;
     }
 
-    bool Window::IsMinimised()
+    bool Window::IsMinimized()
     {
         return SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED;
     }
@@ -394,6 +400,11 @@ namespace Spartan
     bool Window::IsFullScreen()
     {
         return SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN;
+    }
+
+    bool Window::WantsToClose()
+    {
+        return wants_to_close;
     }
 
     void Window::CreateAndShowSplashScreen()
@@ -432,10 +443,10 @@ namespace Spartan
 
     void Window::OnFirstFrameCompleted()
     {
-        // Show engine window
+        // show engine window
         Show();
 
-        // Hide and destroy splash screen window
+        // hide and destroy splash screen window
         SDL_DestroyTexture(m_splash_screen_texture);
         SDL_DestroyRenderer(m_splash_screen_renderer);
         SDL_DestroyWindow(m_splash_sceen_window);

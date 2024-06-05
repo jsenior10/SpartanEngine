@@ -24,11 +24,11 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // RUNTIME
 #if defined(SPARTAN_RUNTIME) || (SPARTAN_RUNTIME_STATIC == 1)
 
-// Definition - DirectX 12
+// definition - DirectX 12
 #if defined(API_GRAPHICS_D3D12)
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
-#pragma warning(push, 0) // Hide warnings which belong DirectX
+#pragma warning(push, 0) // hide warnings which belong DirectX
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <dxcapi.h>
@@ -82,6 +82,9 @@ static const DXGI_FORMAT d3d12_format[] =
     DXGI_FORMAT_D32_FLOAT,
     DXGI_FORMAT_D32_FLOAT_S8X24_UINT,
     // Compressed
+    DXGI_FORMAT_BC1_UNORM,
+    DXGI_FORMAT_BC3_UNORM,
+    DXGI_FORMAT_BC5_UNORM,
     DXGI_FORMAT_BC7_UNORM,
     DXGI_FORMAT_UNKNOWN,
     // Surface
@@ -155,11 +158,11 @@ static const D3D12_BLEND_OP d3d12_blend_operation[] =
 
 #endif
 
-// Definition - Vulkan
+// definition - vulkan
 #if defined(API_GRAPHICS_VULKAN) 
 #pragma comment(lib, "vulkan-1.lib")
 #if defined(_MSC_VER)
-// Include definition of vkCreateWin32SurfaceKHR via vulkan.h
+// include definition of vkCreateWin32SurfaceKHR via vulkan.h
 #define VK_USE_PLATFORM_WIN32_KHR
 #endif
 #pragma warning(push, 0)
@@ -174,11 +177,10 @@ static const VkPolygonMode vulkan_polygon_mode[] =
 };
 
 static const VkCullModeFlags vulkan_cull_mode[] =
-{    
-    VK_CULL_MODE_NONE,
-    VK_CULL_MODE_FRONT_BIT,
+{
     VK_CULL_MODE_BACK_BIT,
-    VK_CULL_MODE_FLAG_BITS_MAX_ENUM
+    VK_CULL_MODE_FRONT_BIT,
+    VK_CULL_MODE_NONE
 };
 
 static const VkPrimitiveTopology vulkan_primitive_topology[] =
@@ -216,8 +218,11 @@ static const VkFormat vulkan_format[] =
     VK_FORMAT_D32_SFLOAT,
     VK_FORMAT_D32_SFLOAT_S8_UINT,
     // Compressed
+    VK_FORMAT_BC1_RGB_UNORM_BLOCK,
+    VK_FORMAT_BC3_UNORM_BLOCK,
+    VK_FORMAT_BC5_UNORM_BLOCK,
     VK_FORMAT_BC7_UNORM_BLOCK,
-    VK_FORMAT_UNDEFINED,
+    VK_FORMAT_ASTC_4x4_UNORM_BLOCK,
     // Surface
     VK_FORMAT_B8G8R8A8_UNORM,
     // Unknown
@@ -324,11 +329,10 @@ static const VkImageLayout vulkan_image_layout[] =
 {
     VK_IMAGE_LAYOUT_GENERAL,
     VK_IMAGE_LAYOUT_PREINITIALIZED,
-    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-    VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-    VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+    VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+    VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR,
     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
     VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -378,7 +382,7 @@ static const char* vkresult_to_string(const VkResult result)
     return "Unknown error code";
 }
 
-#define SP_VK_ASSERT_MSG(vk_result, text_message)          \
+#define SP_ASSERT_VK_MSG(vk_result, text_message)          \
     if (vk_result != VK_SUCCESS)                           \
     {                                                      \
         Log::SetLogToFile(true);                           \
@@ -401,10 +405,6 @@ namespace Spartan
             static VkInstance instance;
             static VkDevice device;
             static VkPhysicalDevice device_physical;
-            static std::vector<VkValidationFeatureEnableEXT> validation_extensions;
-            static std::vector<const char*> extensions_instance;
-            static std::vector<const char*> validation_layers;
-            static std::vector<const char*> extensions_device;
         #endif
 
         // api agnostic

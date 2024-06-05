@@ -29,8 +29,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 namespace Spartan
 {
-    class FontImporter;
-
     enum class ResourceDirectory
     {
         Environment,
@@ -47,7 +45,7 @@ namespace Spartan
         static void Initialize();
         static void Shutdown();
 
-        // Get by name
+        // get by name
         static std::shared_ptr<IResource>& GetByName(const std::string& name, ResourceType type);
         template <class T> 
         static std::shared_ptr<T> GetByName(const std::string& name) 
@@ -55,10 +53,10 @@ namespace Spartan
             return std::static_pointer_cast<T>(GetByName(name, IResource::TypeToEnum<T>()));
         }
 
-        // Get by type
-        static std::vector<std::shared_ptr<IResource>> GetByType(ResourceType type = ResourceType::Unknown);
+        // get by type
+        static std::vector<std::shared_ptr<IResource>> GetByType(ResourceType type = ResourceType::Max);
 
-        // Get by path
+        // get by path
         template <class T>
         static std::shared_ptr<T> GetByPath(const std::string& path)
         {
@@ -71,42 +69,38 @@ namespace Spartan
             return nullptr;
         }
 
-        // Caches resource, or replaces with existing cached resource
+        // caches resource, or replaces with existing cached resource
         template <class T>
         static std::shared_ptr<T> Cache(const std::shared_ptr<T> resource)
         {
-            // Validate resource
+            // validate resource
             if (!resource)
                 return nullptr;
 
-            // Validate resource file path
+            // validate resource file path
             if (!resource->HasFilePathNative() && !FileSystem::IsDirectory(resource->GetResourceFilePathNative()))
             {
                 SP_LOG_ERROR("A resource must have a valid file path in order to be cached");
                 return nullptr;
             }
 
-            // Validate resource file path
+            // validate resource file path
             if (!FileSystem::IsEngineFile(resource->GetResourceFilePathNative()))
             {
                 SP_LOG_ERROR("A resource must have a native file format in order to be cached, provide format was %s", FileSystem::GetExtensionFromFilePath(resource->GetResourceFilePathNative()).c_str());
                 return nullptr;
             }
 
-            // Ensure that this resource is not already cached
+            // ensure that this resource is not already cached
             if (IsCached(resource->GetResourceFilePathNative(), resource->GetResourceType()))
                 return GetByPath<T>(resource->GetResourceFilePathNative());
 
+            // cache it
             std::lock_guard<std::mutex> guard(GetMutex());
-
-            // In order to guarantee deserialization, we save it now
-            resource->SaveToFile(resource->GetResourceFilePathNative());
-
-            // Cache it
             return std::static_pointer_cast<T>(GetResources().emplace_back(resource));
         }
 
-        // Loads a resource and adds it to the resource cache
+        // loads a resource and adds it to the resource cache
         template <class T>
         static std::shared_ptr<T> Load(const std::string& file_path, uint32_t flags = 0)
         {
@@ -116,12 +110,12 @@ namespace Spartan
                 return nullptr;
             }
 
-            // Check if the resource is already loaded
+            // check if the resource is already loaded
             const std::string name = FileSystem::GetFileNameWithoutExtensionFromFilePath(file_path);
             if (IsCached(name, IResource::TypeToEnum<T>()))
                 return GetByName<T>(name);
 
-            // Create new resource
+            // create new resource
             std::shared_ptr<T> resource = std::make_shared<T>();
 
             if (flags != 0)
@@ -129,17 +123,17 @@ namespace Spartan
                 resource->SetFlags(flags);
             }
 
-            // Set a default file path in case it's not overridden by LoadFromFile()
+            // set a default file path in case it's not overridden by LoadFromFile()
             resource->SetResourceFilePath(file_path);
 
-            // Load
+            // load
             if (!resource || !resource->LoadFromFile(file_path))
             {
                 SP_LOG_ERROR("Failed to load \"%s\".", file_path.c_str());
                 return nullptr;
             }
 
-            // Returned cached reference which is guaranteed to be around after deserialization
+            // returned cached reference which is guaranteed to be around after deserialization
             return Cache<T>(resource);
         }
 
@@ -158,16 +152,15 @@ namespace Spartan
                 (
                     GetResources().begin(),
                     GetResources().end(),
-                    [](std::shared_ptr<IResource> resource) { return dynamic_cast<SpObject*>(resource.get())->GetObjectId() == resource->GetObjectId(); }
+                    [](std::shared_ptr<IResource> resource) { return dynamic_cast<SpartanObject*>(resource.get())->GetObjectId() == resource->GetObjectId(); }
                 ),
                 GetResources().end()
             );
         }
 
         // memory
-        static uint64_t GetMemoryUsageCpu(ResourceType type = ResourceType::Unknown);
-        static uint64_t GetMemoryUsageGpu(ResourceType type = ResourceType::Unknown);
-        static uint32_t GetResourceCount(ResourceType type = ResourceType::Unknown);
+        static uint64_t GetMemoryUsage(ResourceType type = ResourceType::Max);
+        static uint32_t GetResourceCount(ResourceType type = ResourceType::Max);
 
         // directories
         static void AddResourceDirectory(ResourceDirectory type, const std::string& directory);
@@ -188,7 +181,7 @@ namespace Spartan
         static bool IsCached(const std::string& resource_name, const ResourceType resource_type);
 
         // event handlers
-        static void SaveResourcesToFiles();
-        static void LoadResourcesFromFiles();
+        static void Serialize();
+        static void Deserialize();
     };
 }

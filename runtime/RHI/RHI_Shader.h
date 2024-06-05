@@ -21,15 +21,15 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #pragma once
 
-//= INCLUDES =================
+//= INCLUDES =====================
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include "../Core/SpObject.h"
+#include "../Core/SpartanObject.h"
 #include "RHI_Vertex.h"
 #include "RHI_Descriptor.h"
-//============================
+//================================
 
 namespace Spartan
 {
@@ -41,14 +41,14 @@ namespace Spartan
         Failed
     };
 
-    class SP_CLASS RHI_Shader : public SpObject
+    class SP_CLASS RHI_Shader : public SpartanObject
     {
     public:
         RHI_Shader();
         ~RHI_Shader();
 
         // compilation
-        void Compile(const RHI_Shader_Stage type, const std::string& file_path, bool async, const RHI_Vertex_Type vertex_type = RHI_Vertex_Type::Max);
+        void Compile(const RHI_Shader_Type type, const std::string& file_path, bool async, const RHI_Vertex_Type vertex_type = RHI_Vertex_Type::Max);
         RHI_ShaderCompilationState GetCompilationState() const { return m_compilation_state; }
         bool IsCompiled() const                                { return m_compilation_state == RHI_ShaderCompilationState::Succeeded; }
 
@@ -68,7 +68,7 @@ namespace Spartan
         const std::vector<RHI_Descriptor>& GetDescriptors()      const { return m_descriptors; }
         const std::shared_ptr<RHI_InputLayout>& GetInputLayout() const { return m_input_layout; } // only valid for a vertex shader
         const auto& GetFilePath()                                const { return m_file_path; }
-        RHI_Shader_Stage GetShaderStage()                        const { return m_shader_type; }
+        RHI_Shader_Type GetShaderStage()                         const { return m_shader_type; }
         uint64_t GetHash()                                       const { return m_hash; }
         const char* GetEntryPoint()                              const;
         const char* GetTargetProfile()                           const;
@@ -77,7 +77,7 @@ namespace Spartan
     private:
         void PreprocessIncludeDirectives(const std::string& file_path);
         void* RHI_Compile();
-        void Reflect(const RHI_Shader_Stage shader_type, const uint32_t* ptr, uint32_t size);
+        void Reflect(const RHI_Shader_Type shader_type, const uint32_t* ptr, uint32_t size);
 
         std::string m_file_path;
         std::string m_preprocessed_source;
@@ -89,7 +89,7 @@ namespace Spartan
         std::vector<RHI_Descriptor> m_descriptors;
         std::shared_ptr<RHI_InputLayout> m_input_layout;
         std::atomic<RHI_ShaderCompilationState> m_compilation_state = RHI_ShaderCompilationState::Idle;
-        RHI_Shader_Stage m_shader_type                              = RHI_Shader_Unknown;
+        RHI_Shader_Type m_shader_type                              = RHI_Shader_Type::Max;
         RHI_Vertex_Type m_vertex_type                               = RHI_Vertex_Type::Max;
         uint64_t m_hash                                             = 0;
 

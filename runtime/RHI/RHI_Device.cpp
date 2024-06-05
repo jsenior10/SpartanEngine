@@ -31,18 +31,22 @@ using namespace Spartan::Math;
 
 namespace Spartan
 {
-    // Device properties
-    float RHI_Device::m_timestamp_period                       = 0;
-    uint64_t RHI_Device::m_min_uniform_buffer_offset_alignment = 0;
-    uint64_t RHI_Device::m_min_storage_buffer_offset_alignment = 0;
-    uint32_t RHI_Device::m_max_texture_1d_dimension            = 0;
-    uint32_t RHI_Device::m_max_texture_2d_dimension            = 0;
-    uint32_t RHI_Device::m_max_texture_3d_dimension            = 0;
-    uint32_t RHI_Device::m_max_texture_cube_dimension          = 0;
-    uint32_t RHI_Device::m_max_texture_array_layers            = 0;
-    uint32_t RHI_Device::m_max_push_constant_size              = 0;
+    // device properties
+    float RHI_Device::m_timestamp_period                        = 0;
+    uint64_t RHI_Device::m_min_uniform_buffer_offset_alignment  = 0;
+    uint64_t RHI_Device::m_min_storage_buffer_offset_alignment  = 0;
+    uint32_t RHI_Device::m_max_texture_1d_dimension             = 0;
+    uint32_t RHI_Device::m_max_texture_2d_dimension             = 0;
+    uint32_t RHI_Device::m_max_texture_3d_dimension             = 0;
+    uint32_t RHI_Device::m_max_texture_cube_dimension           = 0;
+    uint32_t RHI_Device::m_max_texture_array_layers             = 0;
+    uint32_t RHI_Device::m_max_push_constant_size               = 0;
+    uint32_t RHI_Device::m_max_shading_rate_texel_size_x        = 0;
+    uint32_t RHI_Device::m_max_shading_rate_texel_size_y        = 0;
+    uint64_t RHI_Device::m_optimal_buffer_copy_offset_alignment = 0;
+    bool RHI_Device::m_is_shading_rate_supported                = false;
 
-    // Misc
+    // misc
     bool RHI_Device::m_wide_lines                 = false;
     uint32_t  RHI_Device::m_physical_device_index = 0;
     static vector<PhysicalDevice> physical_devices;
@@ -51,13 +55,13 @@ namespace Spartan
     {
         physical_devices.emplace_back(physical_device);
 
-        // Sort devices by type, discrete devices come first.
+        // sort devices by type, discrete devices come first.
         sort(physical_devices.begin(), physical_devices.end(), [](const PhysicalDevice& adapter1, const PhysicalDevice& adapter2)
         {
             return adapter1.GetType() == RHI_PhysicalDevice_Type::Discrete;
         });
 
-        // Sort devices by memory, in an ascending order. The type order will be maintained.
+        // sort devices by memory, in an ascending order. The type order will be maintained.
         sort(physical_devices.begin(), physical_devices.end(), [](const PhysicalDevice& adapter1, const PhysicalDevice& adapter2)
         {
             return adapter1.GetMemory() > adapter2.GetMemory() && adapter1.GetType() == adapter2.GetType();
@@ -93,12 +97,5 @@ namespace Spartan
     {
         return width  > 4 && width  <= m_max_texture_2d_dimension &&
                height > 4 && height <= m_max_texture_2d_dimension;
-    }
-
-    void RHI_Device::QueueWaitAll()
-    {
-        QueueWait(RHI_Queue_Type::Graphics);
-        QueueWait(RHI_Queue_Type::Copy);
-        QueueWait(RHI_Queue_Type::Compute);
     }
 }

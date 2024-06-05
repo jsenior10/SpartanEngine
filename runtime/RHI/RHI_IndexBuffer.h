@@ -22,12 +22,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #pragma once
 
 //= INCLUDES =================
-#include "../Core/SpObject.h"
+#include "../Core/SpartanObject.h"
 //============================
 
 namespace Spartan
 {
-    class RHI_IndexBuffer : public SpObject
+    class RHI_IndexBuffer : public SpartanObject
     {
     public:
         RHI_IndexBuffer() = default;
@@ -41,9 +41,9 @@ namespace Spartan
         template<typename T>
         void Create(const std::vector<T>& indices)
         {
-            m_stride          = sizeof(T);
-            m_index_count     = static_cast<uint32_t>(indices.size());
-            m_object_size_gpu = static_cast<uint64_t>(m_stride * m_index_count);
+            m_stride      = sizeof(T);
+            m_index_count = static_cast<uint32_t>(indices.size());
+            m_object_size = static_cast<uint64_t>(m_stride * m_index_count);
 
             _create(static_cast<const void*>(indices.data()));
         }
@@ -51,9 +51,9 @@ namespace Spartan
         template<typename T>
         void Create(const T* indices, const uint32_t index_count)
         {
-            m_stride          = sizeof(T);
-            m_index_count     = index_count;
-            m_object_size_gpu = static_cast<uint64_t>(m_stride * m_index_count);
+            m_stride      = sizeof(T);
+            m_index_count = index_count;
+            m_object_size = static_cast<uint64_t>(m_stride * m_index_count);
 
             _create(static_cast<const void*>(indices));
         }
@@ -61,9 +61,9 @@ namespace Spartan
         template<typename T>
         void CreateDynamic(const uint32_t index_count)
         {
-            m_stride          = sizeof(T);
-            m_index_count     = index_count;
-            m_object_size_gpu = static_cast<uint64_t>(m_stride * m_index_count);
+            m_stride      = sizeof(T);
+            m_index_count = index_count;
+            m_object_size = static_cast<uint64_t>(m_stride * m_index_count);
 
             _create(nullptr);
         }

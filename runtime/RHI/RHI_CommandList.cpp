@@ -19,50 +19,55 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
-//= INCLUDES =======================
+//= INCLUDES ===============
 #include "pch.h"
 #include "RHI_CommandList.h"
-#include "RHI_Device.h"
-#include "RHI_Fence.h"
+#include "RHI_Texture.h"
 #include "RHI_Semaphore.h"
-#include "RHI_DescriptorSetLayout.h"
-#include "RHI_Shader.h"
-#include "RHI_Pipeline.h"
-#include "RHI_CommandPool.h"
-#include "RHI_VertexBuffer.h"
-#include "RHI_IndexBuffer.h"
-#include "../Rendering/Renderer.h"
-//==================================
+//==========================
 
-//= NAMESPACES =====
+//= NAMESPACES ========
 using namespace std;
-//==================
+using namespace chrono;
+//=====================
 
 namespace Spartan
 {
-    void RHI_CommandList::WaitForExecution()
+    namespace
     {
-        SP_ASSERT_MSG(m_state == RHI_CommandListState::Submitted, "The command list hasn't been submitted, can't wait for it.");
-
-        // Wait for execution to finish
-        if (IsExecuting())
-        {
-            SP_ASSERT_MSG(m_proccessed_fence->Wait(), "Timed out while waiting for the fence");
-        }
-
-        // Reset fence
-        if (m_proccessed_fence->GetStateCpu() == RHI_Sync_State::Submitted)
-        {
-            m_proccessed_fence->Reset();
-        }
-
-        m_state = RHI_CommandListState::Idle;
+        bool log_wait_time = false;
+        time_point<high_resolution_clock> start_time;
     }
 
-    bool RHI_CommandList::IsExecuting()
+    void RHI_CommandList::WaitForExecution()
     {
-        return
-            m_state == RHI_CommandListState::Submitted && // it has been submitted
-            !m_proccessed_fence->IsSignaled();            // and the fence is not signaled yet
+        SP_ASSERT_MSG(m_state == RHI_CommandListState::Submitted, "the command list hasn't been submitted, can't wait for it.");
+
+        if (log_wait_time)
+        { 
+            start_time = high_resolution_clock::now();
+        }
+
+        // wait
+        uint64_t value      = m_rendering_complete_semaphore_timeline->GetValue();
+        uint64_t wait_value = m_rendering_complete_semaphore_timeline->GetWaitValue();
+        m_rendering_complete_semaphore_timeline->Wait(wait_value);
+        m_state = RHI_CommandListState::Idle;
+
+        if (log_wait_time)
+        {
+            auto end_time = high_resolution_clock::now();
+            auto duration = duration_cast<microseconds>(end_time - start_time).count();
+            SP_LOG_INFO("wait time: %lld microseconds\n", duration);
+        }
+    }
+
+    void RHI_CommandList::Dispatch(RHI_Texture* texture)
+    {
+        const float thread_group_count      = 8.0f;
+        const uint32_t thread_group_count_x = static_cast<uint32_t>(Math::Helper::Ceil(static_cast<float>(texture->GetWidth()) / thread_group_count));
+        const uint32_t thread_group_count_y = static_cast<uint32_t>(Math::Helper::Ceil(static_cast<float>(texture->GetHeight()) / thread_group_count));
+
+        Dispatch(thread_group_count_x, thread_group_count_y);
     }
 }

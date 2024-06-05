@@ -37,13 +37,12 @@ namespace Spartan
     class SP_CLASS Engine
     {
     public:
-        static void Initialize();
+        static void Initialize(const std::vector<std::string>& args);
         static void Shutdown();
         static void Tick();
-
-        static void AddFlag(const EngineMode flag);
-        static void RemoveFlag(const EngineMode flag);
         static bool IsFlagSet(const EngineMode flag);
+        static void SetFlag(const EngineMode flag, const bool enabled);
         static void ToggleFlag(const EngineMode flag);
+        static bool HasArgument(const std::string& argument);
     };
 }

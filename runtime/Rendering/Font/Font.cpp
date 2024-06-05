@@ -45,7 +45,7 @@ namespace Spartan
         constexpr uint8_t ASCII_SPACE    = 32;
     }
 
-    Font::Font(const string& file_path, const uint32_t font_size, const Vector4& color) : IResource(ResourceType::Font)
+    Font::Font(const string& file_path, const uint32_t font_size, const Color& color) : IResource(ResourceType::Font)
     {
         m_vertex_buffer   = make_shared<RHI_VertexBuffer>(true, "font");
         m_index_buffer    = make_shared<RHI_IndexBuffer>(true, "font");
@@ -104,7 +104,7 @@ namespace Spartan
         position.x -= 0.5f * viewport_width;
         position.y += 0.5f * viewport_height;
 
-        // i don't yet understand why this is needed, but it corrects a slightly y offset
+        // don't yet understand why this is needed, but it corrects a slight y offset
         position.y -= m_char_max_height * 1.5f;
 
         // set the cursor to the starting position
@@ -119,13 +119,12 @@ namespace Spartan
 
             if (character == ASCII_TAB)
             {
-                const uint32_t space_offset       = m_glyphs[ASCII_SPACE].horizontal_advance;
-                const uint32_t space_count        = 4; // spaces in a typical editor
-                const uint32_t tab_spacing        = space_offset * space_count;
-                const uint32_t offset_from_start  = static_cast<uint32_t>(Math::Helper::Abs(cursor.x - starting_pos_x));
-                const uint32_t next_column_index  = tab_spacing == 0 ? 4 : (offset_from_start / tab_spacing) + 1;
-                const uint32_t offset_to_column   = (next_column_index * tab_spacing) - offset_from_start;
-                cursor.x                         += offset_to_column;
+                const uint32_t space_offset = m_glyphs[ASCII_SPACE].horizontal_advance;
+                const uint32_t tab_spacing  = space_offset * 4; // spaces in a typical editor
+                float offset_from_start     = cursor.x - starting_pos_x; // keep as float for precision
+                uint32_t next_column_index  = tab_spacing == 0 ? 4 : static_cast<uint32_t>((offset_from_start / tab_spacing) + 1);
+                float offset_to_column      = (next_column_index * tab_spacing) - offset_from_start;
+                cursor.x                    += offset_to_column; // apply offset to align to next tab stop
             }
             else if (character == ASCII_NEW_LINE)
             {

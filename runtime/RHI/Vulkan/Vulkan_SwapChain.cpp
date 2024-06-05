@@ -25,11 +25,13 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../RHI_Device.h"
 #include "../RHI_SwapChain.h"
 #include "../RHI_Implementation.h"
+#include "../RHI_Fence.h"
 #include "../RHI_Semaphore.h"
-#include "../RHI_CommandPool.h"
+#include "../RHI_Queue.h"
 #include "../Display/Display.h"
+#include "../Rendering/Renderer.h"
 SP_WARNINGS_OFF
-#include <SDL_vulkan.h>
+#include <SDL/SDL_vulkan.h>
 SP_WARNINGS_ON
 //================================
 
@@ -41,22 +43,36 @@ using namespace Spartan::Math;
 namespace Spartan
 {
     namespace
-    { 
+    {
         VkColorSpaceKHR get_color_space(const RHI_Format format)
         {
-            // VK_COLOR_SPACE_HDR10_ST2084_EXT represents the HDR10 color space with the ST.2084 (PQ)electro - optical transfer function.
-            // This is the most common HDR format used for HDR TVs and monitors.
-
-            // VK_COLOR_SPACE_SRGB_NONLINEAR_KHR represents the sRGB color space
-            // This is the standard color space for the web and is supported by most modern displays.
-            // sRGB is a nonlinear color space, which means that the values stored in an image are not directly proportional to the perceived brightness of the colors.
-            // When displaying an image in sRGB, the values must be converted to linear space before they are displayed.
-
-            VkColorSpaceKHR color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;                                                                // SDR
-            color_space                 = format == RHI_Format::R16G16B16A16_Float ? VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT : color_space; // HDR
-            color_space                 = format == RHI_Format::R10G10B10A2_Unorm  ? VK_COLOR_SPACE_HDR10_ST2084_EXT         : color_space; // HDR
+            VkColorSpaceKHR color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;                                                       // SDR
+            color_space                 = format == RHI_Format::R10G10B10A2_Unorm ? VK_COLOR_SPACE_HDR10_ST2084_EXT : color_space; // HDR
 
             return color_space;
+        }
+
+        void set_hdr_metadata(const VkSwapchainKHR& swapchain)
+        {
+            VkHdrMetadataEXT hdr_metadata          = {};
+            hdr_metadata.sType                     = VK_STRUCTURE_TYPE_HDR_METADATA_EXT;
+            hdr_metadata.displayPrimaryRed.x       = 0.708f;
+            hdr_metadata.displayPrimaryRed.y       = 0.292f;
+            hdr_metadata.displayPrimaryGreen.x     = 0.170f;
+            hdr_metadata.displayPrimaryGreen.y     = 0.797f;
+            hdr_metadata.displayPrimaryBlue.x      = 0.131f;
+            hdr_metadata.displayPrimaryBlue.y      = 0.046f;
+            hdr_metadata.whitePoint.x              = 0.3127f;
+            hdr_metadata.whitePoint.y              = 0.3290f;
+            const float nits_to_lumin              = 10000.0f;
+            hdr_metadata.maxLuminance              = Display::GetLuminanceMax() * nits_to_lumin;
+            hdr_metadata.minLuminance              = 0.001f * nits_to_lumin;
+            hdr_metadata.maxContentLightLevel      = 2000.0f;
+            hdr_metadata.maxFrameAverageLightLevel = 500.0f;
+
+            PFN_vkSetHdrMetadataEXT pfnVkSetHdrMetadataEXT = (PFN_vkSetHdrMetadataEXT)vkGetDeviceProcAddr(RHI_Context::device , "vkSetHdrMetadataEXT");
+            SP_ASSERT(pfnVkSetHdrMetadataEXT != nullptr);
+            pfnVkSetHdrMetadataEXT(RHI_Context::device, 1, &swapchain, &hdr_metadata);
         }
 
         VkSurfaceCapabilitiesKHR get_surface_capabilities(const VkSurfaceKHR surface)
@@ -107,11 +123,11 @@ namespace Spartan
         vector<VkSurfaceFormatKHR> get_supported_surface_formats(const VkSurfaceKHR surface)
         {
             uint32_t format_count;
-            SP_VK_ASSERT_MSG(vkGetPhysicalDeviceSurfaceFormatsKHR(RHI_Context::device_physical, surface, &format_count, nullptr),
+            SP_ASSERT_VK_MSG(vkGetPhysicalDeviceSurfaceFormatsKHR(RHI_Context::device_physical, surface, &format_count, nullptr),
                 "Failed to get physical device surface format count");
 
             vector<VkSurfaceFormatKHR> surface_formats(format_count);
-            SP_VK_ASSERT_MSG(vkGetPhysicalDeviceSurfaceFormatsKHR(RHI_Context::device_physical, surface, &format_count, &surface_formats[0]),
+            SP_ASSERT_VK_MSG(vkGetPhysicalDeviceSurfaceFormatsKHR(RHI_Context::device_physical, surface, &format_count, &surface_formats[0]),
                 "Failed to get physical device surfaces");
 
             return surface_formats;
@@ -130,7 +146,7 @@ namespace Spartan
 
             for (const VkSurfaceFormatKHR& supported_format : supported_formats)
             {
-                bool support_format      = supported_format.format == vulkan_format[rhi_format_to_index(*format)];
+                bool support_format = supported_format.format == vulkan_format[rhi_format_to_index(*format)];
                 bool support_color_space = supported_format.colorSpace == color_space;
 
                 if (support_format && support_color_space)
@@ -152,7 +168,7 @@ namespace Spartan
 
             // Get physical device surface capabilities
             VkSurfaceCapabilitiesKHR surface_capabilities;
-            SP_VK_ASSERT_MSG(
+            SP_ASSERT_VK_MSG(
                 vkGetPhysicalDeviceSurfaceCapabilitiesKHR(RHI_Context::device_physical, surface, &surface_capabilities),
                 "Failed to get surface capabilities");
 
@@ -175,13 +191,14 @@ namespace Spartan
         const uint32_t height,
         const RHI_Present_Mode present_mode,
         const uint32_t buffer_count,
+        const bool hdr,
         const char* name
     )
     {
         SP_ASSERT_MSG(RHI_Device::IsValidResolution(width, height), "Invalid resolution");
-        SP_ASSERT_MSG(buffer_count >= 2,                            "Buffer can't be less than 2");
+        SP_ASSERT_MSG(buffer_count >= 2, "Buffer count can't be less than 2");
 
-        m_format       = format_sdr; // for now, we use SDR by default as HDR doesn't look rigth - Display::GetHdr() ? format_hdr : format_sdr;
+        m_format       = hdr ? format_hdr : format_sdr;
         m_buffer_count = buffer_count;
         m_width        = width;
         m_height       = height;
@@ -212,7 +229,7 @@ namespace Spartan
                 "Failed to created window surface");
 
             VkBool32 present_support = false;
-            SP_VK_ASSERT_MSG(vkGetPhysicalDeviceSurfaceSupportKHR(
+            SP_ASSERT_VK_MSG(vkGetPhysicalDeviceSurfaceSupportKHR(
                 RHI_Context::device_physical,
                 RHI_Device::QueueGetIndex(RHI_Queue_Type::Graphics),
                 surface,
@@ -230,7 +247,7 @@ namespace Spartan
         SP_ASSERT_MSG(is_format_and_color_space_supported(surface, &m_format, color_space), "The surface doesn't support the requested format");
 
         // clamp size between the supported min and max
-        m_width  = Math::Helper::Clamp(m_width,  capabilities.minImageExtent.width,  capabilities.maxImageExtent.width);
+        m_width  = Math::Helper::Clamp(m_width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
         m_height = Math::Helper::Clamp(m_height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
 
         // swap chain
@@ -267,32 +284,35 @@ namespace Spartan
             create_info.clipped        = VK_TRUE;
             create_info.oldSwapchain   = nullptr;
 
-            SP_VK_ASSERT_MSG(vkCreateSwapchainKHR(RHI_Context::device, &create_info, nullptr, &swap_chain),
+            SP_ASSERT_VK_MSG(vkCreateSwapchainKHR(RHI_Context::device, &create_info, nullptr, &swap_chain),
                 "Failed to create swapchain");
+
+            set_hdr_metadata(swap_chain);
         }
 
         // images
         {
             uint32_t image_count = 0;
-            SP_VK_ASSERT_MSG(vkGetSwapchainImagesKHR(RHI_Context::device, swap_chain, &image_count, nullptr), "Failed to get swapchain image count");
-            SP_VK_ASSERT_MSG(vkGetSwapchainImagesKHR(RHI_Context::device, swap_chain, &image_count, reinterpret_cast<VkImage*>(m_rhi_rt.data())), "Failed to get swapchain image count");
+            SP_ASSERT_VK_MSG(vkGetSwapchainImagesKHR(RHI_Context::device, swap_chain, &image_count, nullptr), "Failed to get swapchain image count");
+            SP_ASSERT_VK_MSG(vkGetSwapchainImagesKHR(RHI_Context::device, swap_chain, &image_count, reinterpret_cast<VkImage*>(m_rhi_rt.data())), "Failed to get swapchain image count");
 
             // transition layouts to VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
             if (RHI_CommandList* cmd_list = RHI_Device::CmdImmediateBegin(RHI_Queue_Type::Graphics))
             {
                 for (uint32_t i = 0; i < m_buffer_count; i++)
                 {
-                    cmd_list->InsertBarrier(
+                    cmd_list->InsertBarrierTexture(
                         m_rhi_rt[i],
                         VK_IMAGE_ASPECT_COLOR_BIT,
                         0,
                         1,
                         1,
                         RHI_Image_Layout::Max,
-                        RHI_Image_Layout::Color_Attachment
+                        RHI_Image_Layout::Attachment,
+                        false
                     );
 
-                    m_layouts[i] = RHI_Image_Layout::Color_Attachment;
+                    m_layouts[i] = RHI_Image_Layout::Attachment;
                 }
 
                 // end/flush
@@ -328,11 +348,11 @@ namespace Spartan
         m_rhi_surface   = static_cast<void*>(surface);
         m_rhi_swapchain = static_cast<void*>(swap_chain);
 
-        // semaphores
         for (uint32_t i = 0; i < m_buffer_count; i++)
         {
-            string name = (string("swapchain_image_acquired_") + to_string(i));
-            m_acquire_semaphore[i] = make_shared<RHI_Semaphore>(false, name.c_str());
+            string name            = (string("swapchain_image_acquired_") + to_string(i));
+            m_image_acquired_semaphore[i] = make_shared<RHI_Semaphore>(false, name.c_str());
+            m_image_acquired_fence[i]     = make_shared<RHI_Fence>(name.c_str());
         }
     }
 
@@ -347,7 +367,7 @@ namespace Spartan
         }
 
         m_rhi_rtv.fill(nullptr);
-        m_acquire_semaphore.fill(nullptr);
+        m_image_acquired_semaphore.fill(nullptr);
 
         RHI_Device::QueueWaitAll();
 
@@ -373,9 +393,9 @@ namespace Spartan
         m_width  = width;
         m_height = height;
 
-        // reset image index
-        m_image_index          = numeric_limits<uint32_t>::max();
-        m_image_index_previous = m_image_index;
+        // reset indices
+        m_image_index = numeric_limits<uint32_t>::max();
+        m_sync_index  = numeric_limits<uint32_t>::max();
 
         Destroy();
         Create();
@@ -391,59 +411,56 @@ namespace Spartan
 
     void RHI_SwapChain::AcquireNextImage()
     {
-        // get signal semaphore
-        m_sync_index = (m_sync_index + 1) % m_buffer_count;
-        RHI_Semaphore* signal_semaphore = m_acquire_semaphore[m_sync_index].get();
-        SP_ASSERT_MSG(signal_semaphore->GetStateCpu() != RHI_Sync_State::Submitted, "The semaphore is already signaled");
+        if (m_sync_index != numeric_limits<uint32_t>::max())
+        {
+            m_image_acquired_fence[m_sync_index]->Wait();
+            m_image_acquired_fence[m_sync_index]->Reset();
+        }
 
-        m_image_index_previous = m_image_index;
+        // get sync objects
+        m_sync_index                    = (m_sync_index + 1) % m_buffer_count;
+        RHI_Semaphore* signal_semaphore = m_image_acquired_semaphore[m_sync_index].get();
+        RHI_Fence* signal_fence         = m_image_acquired_fence[m_sync_index].get();
 
         // acquire next image
-        SP_VK_ASSERT_MSG(vkAcquireNextImageKHR(
+        SP_ASSERT_VK_MSG(vkAcquireNextImageKHR(
             RHI_Context::device,                                          // device
             static_cast<VkSwapchainKHR>(m_rhi_swapchain),                 // swapchain
             numeric_limits<uint64_t>::max(),                              // timeout - wait/block
             static_cast<VkSemaphore>(signal_semaphore->GetRhiResource()), // signal semaphore
-            nullptr,                                                      // signal fence
+            static_cast<VkFence>(signal_fence->GetRhiResource()),         // signal fence
             &m_image_index                                                // pImageIndex
         ), "Failed to acquire next image");
-
-        // update semaphore state
-        signal_semaphore->SetStateCpu(RHI_Sync_State::Submitted);
     }
 
     void RHI_SwapChain::Present()
     {
-        SP_ASSERT_MSG(!(SDL_GetWindowFlags(static_cast<SDL_Window*>(m_sdl_window)) & SDL_WINDOW_MINIMIZED), "Present should not be called for a minimized window");
-        SP_ASSERT_MSG(m_rhi_swapchain != nullptr,                                                           "Invalid swapchain");
-        SP_ASSERT_MSG(m_image_index != m_image_index_previous,                                              "No image was acquired");
-        SP_ASSERT_MSG(m_layouts[m_image_index] == RHI_Image_Layout::Present_Source,                         "Invalid layout");
+        SP_ASSERT(m_layouts[m_image_index] == RHI_Image_Layout::Present_Source);
 
-        // get the semaphores that present should wait for
         m_wait_semaphores.clear();
-        {
-            // semaphores which are signaled when command lists have finished executing
-            for (const shared_ptr<RHI_CommandPool>& cmd_pool : RHI_Device::GetCommandPools())
-            {
-                // the editor supports multiple windows, so we can be dealing with multiple swapchains
-                if (m_object_id == cmd_pool->GetSwapchainId())
-                {
-                    RHI_Semaphore* semaphore_cmd_list = cmd_pool->GetCurrentCommandList()->GetSemaphoreProccessed();
-                    if (semaphore_cmd_list->GetStateCpu() == RHI_Sync_State::Submitted)
-                    {
-                        m_wait_semaphores.emplace_back(semaphore_cmd_list);
-                    }
-                }
-            }
-            SP_ASSERT_MSG(!m_wait_semaphores.empty(), "Present() present should not be called if no work is to be presented");
+        RHI_Queue* queue = RHI_Device::GetQueue(RHI_Queue_Type::Graphics);
 
-            // semaphore that's signaled when the image is acquired
-            RHI_Semaphore* semaphore_image_aquired = m_acquire_semaphore[m_sync_index].get();
-            SP_ASSERT(semaphore_image_aquired->GetStateCpu() == RHI_Sync_State::Submitted);
-            m_wait_semaphores.emplace_back(semaphore_image_aquired);
+        // semaphores from command lists
+        RHI_CommandList* cmd_list       = queue->GetCommandList();
+        bool presents_to_this_swapchain = cmd_list->GetSwapchainId() == m_object_id;
+        bool has_work_to_present        = cmd_list->GetState() == RHI_CommandListState::Submitted;
+        if (presents_to_this_swapchain && has_work_to_present)
+        {
+            RHI_Semaphore* semaphore = cmd_list->GetRenderingCompleteSemaphore();
+            if (semaphore->IsSignaled())
+            {
+                semaphore->SetSignaled(false);
+            }
+
+            m_wait_semaphores.emplace_back(semaphore);
         }
 
-        RHI_Device::QueuePresent(m_rhi_swapchain, &m_image_index, m_wait_semaphores);
+        // semaphore from vkAcquireNextImageKHR
+        RHI_Semaphore* image_acquired_semaphore = m_image_acquired_semaphore[m_sync_index].get();
+        m_wait_semaphores.emplace_back(image_acquired_semaphore);
+
+        // present
+        queue->Present(m_rhi_swapchain, m_image_index, m_wait_semaphores);
         AcquireNextImage();
     }
 
@@ -452,11 +469,12 @@ namespace Spartan
         if (m_layouts[m_image_index] == layout)
             return;
 
-        cmd_list->InsertBarrier(
+        cmd_list->InsertBarrierTexture(
             m_rhi_rt[m_image_index],
             VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 1,
             m_layouts[m_image_index],
-            layout
+            layout,
+            false
         );
 
         m_layouts[m_image_index] = layout;
@@ -475,7 +493,6 @@ namespace Spartan
         {
             m_format = new_format;
             Resize(m_width, m_height, true);
-            SP_LOG_INFO("HDR has been %s", enabled ? "enabled" : "disabled");
         }
     }
 

@@ -29,18 +29,18 @@ static const float3 g_atmospheric_color = float3(0.4f, 0.4f, 0.8f);
 /*------------------------------------------------------------------------------
     FOG - RADIAL
 ------------------------------------------------------------------------------*/
-float3 got_fog_radial(const float3 pixel_position, const float3 camera_position)
+float3 got_fog_radial(const float camera_to_pixel_length, const float3 camera_position, const float directional_light_intensity)
 {
     // parameters
     const float g_fog_radius    = 150.0f; // how far away from the camera the fog starts
     const float g_fog_fade_rate = 0.05f;  // higher values make the fog fade in more abruptly
     
-    float distance_from_camera = length(pixel_position - camera_position) - g_fog_radius;
+    float distance_from_camera = camera_to_pixel_length - g_fog_radius;
     float distance_factor      = max(0.0f, distance_from_camera) / g_fog_radius; // normalize the distance
     float fog_factor           = 1.0f - exp(-g_fog_fade_rate * distance_factor); // exponential fog factor
     float fog_density          = pass_get_f3_value().y;
     
-    return fog_factor * fog_density * g_atmospheric_color;
+    return fog_factor * fog_density * g_atmospheric_color * directional_light_intensity;
 }
 
 /*------------------------------------------------------------------------------
@@ -48,20 +48,42 @@ float3 got_fog_radial(const float3 pixel_position, const float3 camera_position)
 ------------------------------------------------------------------------------*/
 float visibility(float3 position, Light light, uint2 pixel_pos)
 {
-    // project to light space
-    uint slice_index = light.is_point() ? direction_to_cube_face_index(light.to_pixel) : 0;
-    float3 pos_ndc   = world_to_ndc(position, light.view_projection[slice_index]);
-    float2 pos_uv    = ndc_to_uv(pos_ndc);
+    bool is_visible      = is_visible = light.is_directional(); // directioanl light is everywhere, so assume visible
+    float2 projected_uv  = 0.0f;
+    float3 projected_pos = 0.0f;
 
-    // shadow map comparison
-    bool is_visible = light.is_directional(); // directioanl light is everywhere, so assume visible
-    if (is_valid_uv(pos_uv))
+    // slice index
+    float dot_result = dot(light.forward, light.to_pixel);
+    uint slice_index = light.is_point() * step(0.0f, -dot_result);
+
+    // projection and shadow map comparison
+    if (light.is_point())
     {
-        float3 sample_coords  = light.is_point() ? light.to_pixel : float3(pos_uv.x, pos_uv.y, slice_index);
-        float shadow_depth    = light.sample_depth(sample_coords);
-        is_visible            = pos_ndc.z > shadow_depth;
+        // project
+        projected_pos = mul(float4(position, 1.0f), light.transform[slice_index]).xyz;
+        float3 ndc    = project_onto_paraboloid(projected_pos, light.near, light.far);
+        projected_uv  = ndc_to_uv(ndc.xy);
+
+        // compare
+        float3 sample_coords = float3(projected_uv, slice_index);
+        float shadow_depth   = light.sample_depth(sample_coords);
+        is_visible           = ndc.z > shadow_depth;
     }
-    
+    else
+    {
+        // project
+        projected_pos = world_to_ndc(position, light.transform[slice_index]);
+        projected_uv  = ndc_to_uv(projected_pos);
+
+        // compare
+        if (is_valid_uv(projected_uv))
+        {
+            float3 sample_coords = float3(projected_uv.x, projected_uv.y, slice_index);
+            float shadow_depth   = light.sample_depth(sample_coords);
+            is_visible           = projected_pos.z > shadow_depth;
+        }
+    }
+
     return is_visible ? 1.0f : 0.0f;
 }
 
@@ -70,7 +92,7 @@ float3 compute_volumetric_fog(Surface surface, Light light, uint2 pixel_pos)
     // parameters
     const float fog_density = pass_get_f3_value().x * 0.03f;
     const uint step_count   = 64;
-    
+
     const float total_distance = surface.camera_to_pixel_length;
     const float step_length    = total_distance / step_count; 
     const float3 ray_origin    = buffer_frame.camera_position;

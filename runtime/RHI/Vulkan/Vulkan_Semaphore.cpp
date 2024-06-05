@@ -24,7 +24,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../RHI_Device.h"
 #include "../RHI_Semaphore.h"
 #include "../RHI_Implementation.h"
-#include "../Rendering/Renderer.h"
 //================================
 
 namespace Spartan
@@ -44,7 +43,6 @@ namespace Spartan
         semaphore_create_info.pNext                 = is_timeline ? &semaphore_type_create_info : nullptr;
         semaphore_create_info.flags                 = 0;
 
-        // Create
         SP_ASSERT_MSG(
             vkCreateSemaphore(device, &semaphore_create_info, nullptr, reinterpret_cast<VkSemaphore*>(&resource)) == VK_SUCCESS,
             "Failed to create semaphore"
@@ -57,7 +55,6 @@ namespace Spartan
 
         create_semaphore(RHI_Context::device, m_is_timeline, m_rhi_resource);
 
-        // Name
         if (name)
         {
             m_object_name = name;
@@ -74,7 +71,7 @@ namespace Spartan
         m_rhi_resource = nullptr;
     }
 
-    void RHI_Semaphore::Wait(const uint64_t value, uint64_t timeout /*= std::numeric_limits<uint64_t>::max()*/)
+    void RHI_Semaphore::Wait(const uint64_t value, const uint64_t timeout /*= std::numeric_limits<uint64_t>::max()*/) 
     {
         SP_ASSERT(m_is_timeline);
 
@@ -86,10 +83,10 @@ namespace Spartan
         semaphore_wait_info.pSemaphores         = reinterpret_cast<VkSemaphore*>(&m_rhi_resource);
         semaphore_wait_info.pValues             = &value;
 
-        SP_VK_ASSERT_MSG(vkWaitSemaphores(RHI_Context::device, &semaphore_wait_info, timeout), "Failed to wait for semaphore");
+        SP_ASSERT_VK_MSG(vkWaitSemaphores(RHI_Context::device, &semaphore_wait_info, timeout), "Failed to wait for semaphore");
     }
 
-    void RHI_Semaphore::Signal(const uint64_t value)
+    void RHI_Semaphore::Signal(const uint64_t value) const
     {
         SP_ASSERT(m_is_timeline);
 
@@ -99,16 +96,16 @@ namespace Spartan
         semaphore_signal_info.semaphore             = static_cast<VkSemaphore>(m_rhi_resource);
         semaphore_signal_info.value                 = value;
 
-        SP_VK_ASSERT_MSG(vkSignalSemaphore(RHI_Context::device, &semaphore_signal_info),
+        SP_ASSERT_VK_MSG(vkSignalSemaphore(RHI_Context::device, &semaphore_signal_info),
             "Failed to signal semaphore");
     }
 
-    uint64_t RHI_Semaphore::GetValue()
+    uint64_t RHI_Semaphore::GetValue() const
     {
         SP_ASSERT(m_is_timeline);
 
         uint64_t value = 0;
-        SP_VK_ASSERT_MSG(
+        SP_ASSERT_VK_MSG(
             vkGetSemaphoreCounterValue(RHI_Context::device, static_cast<VkSemaphore>(m_rhi_resource), &value),
             "Failed to get semaphore counter value");
 

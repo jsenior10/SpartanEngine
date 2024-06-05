@@ -31,7 +31,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 class Editor
 {
 public:
-    Editor();
+    Editor(const std::vector<std::string>& args);
     ~Editor();
 
     void Tick();
@@ -50,12 +50,11 @@ public:
         return nullptr;
     }
 
-    inline static ImFont* font_normal   = nullptr;
-    inline static ImFont* font_bold = nullptr;
+    inline static ImFont* font_normal = nullptr;
+    inline static ImFont* font_bold   = nullptr;
 
 private:
     void BeginWindow();
 
-    bool m_editor_begun = false;
     std::vector<std::shared_ptr<Widget>> m_widgets;
 };

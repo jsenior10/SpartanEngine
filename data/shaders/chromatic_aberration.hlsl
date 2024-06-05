@@ -27,26 +27,29 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 static const float g_chromatic_aberration_intensity = 5.0f;
 
 [numthreads(THREAD_GROUP_COUNT_X, THREAD_GROUP_COUNT_Y, 1)]
-void mainCS(uint3 thread_id : SV_DispatchThreadID)
+void main_cs(uint3 thread_id : SV_DispatchThreadID)
 {
-    if (any(int2(thread_id.xy) >= pass_get_resolution_out()))
+    float2 resolution_out;
+    tex_uav.GetDimensions(resolution_out.x, resolution_out.y);
+    if (any(int2(thread_id.xy) >= resolution_out))
         return;
 
-    const float2 uv       = (thread_id.xy + 0.5f) / pass_get_resolution_out();
+    const float2 uv       = (thread_id.xy + 0.5f) / resolution_out;
     float camera_aperture = pass_get_f3_value().x;
     float camera_error    = sqrt(1.0f / camera_aperture);
     float intensity       = camera_error * g_chromatic_aberration_intensity;
     float2 shift          = float2(intensity, -intensity);
 
-    // Lens effect
+    // lens effect
     shift.x *= abs(uv.x * 2.0f - 1.0f);
     shift.y *= abs(uv.y * 2.0f - 1.0f);
 
-    // Sample color
-    float3 color = 0.0f; 
-    color.r      = tex.SampleLevel(samplers[sampler_bilinear_clamp], uv + (get_rt_texel_size() * shift), 0).r;
-    color.g      = tex[thread_id.xy].g;
-    color.b      = tex.SampleLevel(samplers[sampler_bilinear_clamp], uv - (get_rt_texel_size() * shift), 0).b;
+    // sample color
+    float3 color      = 0.0f;
+    float2 texel_size = 1.0f / resolution_out;
+    color.r           = tex.SampleLevel(samplers[sampler_bilinear_clamp], uv + (texel_size * shift), 0).r;
+    color.g           = tex[thread_id.xy].g;
+    color.b           = tex.SampleLevel(samplers[sampler_bilinear_clamp], uv - (texel_size * shift), 0).b;
 
     tex_uav[thread_id.xy] = float4(color, tex[thread_id.xy].a);
 }

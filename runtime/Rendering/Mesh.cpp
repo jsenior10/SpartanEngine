@@ -101,14 +101,10 @@ namespace Spartan
 
         // compute memory usage
         {
-            // cpu
-            m_object_size_cpu = GetMemoryUsage();
-
-            // gpu
             if (m_vertex_buffer && m_index_buffer)
             {
-                m_object_size_gpu = m_vertex_buffer->GetObjectSizeGpu();
-                m_object_size_gpu += m_index_buffer->GetObjectSizeGpu();
+                m_object_size = m_vertex_buffer->GetObjectSize();
+                m_object_size += m_index_buffer->GetObjectSize();
             }
         }
 
@@ -299,7 +295,7 @@ namespace Spartan
         else // if we didn't get a texture, it's not cached, hence we have to load it and cache it now
         {
             // load texture
-            texture = ResourceCache::Load<RHI_Texture2D>(file_path, RHI_Texture_Srv | RHI_Texture_Mips | RHI_Texture_Compressed);
+            texture = ResourceCache::Load<RHI_Texture2D>(file_path, RHI_Texture_Srv);
 
             // set the texture to the provided material
             material->SetTexture(texture_type, texture);

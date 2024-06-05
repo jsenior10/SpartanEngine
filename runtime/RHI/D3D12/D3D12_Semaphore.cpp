@@ -39,4 +39,14 @@ namespace Spartan
     {
 
     }
+
+    void RHI_Semaphore::Wait(const uint64_t value, const uint64_t timeout /*= std::numeric_limits<uint64_t>::max()*/)
+    {
+
+    }
+
+    uint64_t RHI_Semaphore::GetValue() const
+    {
+        return 0;
+    }
 }

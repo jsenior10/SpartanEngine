@@ -23,6 +23,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 //= INCLUDES ====================
 #include "Components/Component.h"
+#include "../Math/Quaternion.h"
+#include <array>
+#include "../Math/Matrix.h"
+#include <mutex>
+#include "Event.h"
+#include "World.h"
 //===============================
 
 namespace Spartan
@@ -30,7 +36,7 @@ namespace Spartan
     class FileStream;
     class Renderable;
     
-    class SP_CLASS Entity : public SpObject, public std::enable_shared_from_this<Entity>
+    class SP_CLASS Entity : public SpartanObject, public std::enable_shared_from_this<Entity>
     {
     public:
         Entity();
@@ -49,9 +55,8 @@ namespace Spartan
         void Deserialize(FileStream* stream, std::shared_ptr<Entity> parent);
 
         // active
-        bool IsActive() const             { return m_is_active; }
+        bool IsActive() const;
         void SetActive(const bool active) { m_is_active = active; }
-        bool IsActiveRecursively();
 
         // visible
         bool IsVisibleInHierarchy() const                            { return m_hierarchy_visibility; }
@@ -77,8 +82,7 @@ namespace Spartan
             component->SetType(type);
             component->OnInitialize();
 
-            // make the scene resolve
-            SP_FIRE_EVENT(EventType::WorldResolve);
+            World::Resolve();
 
             return component;
         }
@@ -101,7 +105,7 @@ namespace Spartan
             const ComponentType component_type = Component::TypeToEnum<T>();
             m_components[static_cast<uint32_t>(component_type)] = nullptr;
 
-            SP_FIRE_EVENT(EventType::WorldResolve);
+            World::Resolve();
         }
 
         void RemoveComponentById(uint64_t id);
@@ -164,6 +168,7 @@ namespace Spartan
         const Math::Matrix& GetLocalMatrix() const         { return m_matrix_local; }
         const Math::Matrix& GetMatrixPrevious() const      { return m_matrix_previous; }
         void SetMatrixPrevious(const Math::Matrix& matrix) { m_matrix_previous = matrix; }
+        bool HasTransformChanged() const;
 
     private:
         std::atomic<bool> m_is_active = true;
@@ -188,5 +193,6 @@ namespace Spartan
         // misc
         std::mutex m_mutex_children;
         std::mutex m_mutex_parent;
+        uint64_t m_transform_changed_frame = 0;
     };
 }

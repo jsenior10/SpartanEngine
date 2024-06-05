@@ -27,11 +27,11 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../Rendering/Renderer_Definitions.h"
 #include "../../Math/Matrix.h"
 #include "../../Math/BoundingBox.h"
+#include "../Rendering/Mesh.h"
 //============================================
 
 namespace Spartan
 {
-    class Mesh;
     class Material;
     class RHI_VertexBuffer;
     class RHI_IndexBuffer;
@@ -46,10 +46,10 @@ namespace Spartan
 
     enum RenderableFlags : uint32_t
     {
-        IsInViewFrustum = 1U << 0,
-        IsOccludee      = 1U << 1,
-        IsOccluder      = 1U << 2,
-        CastsShadows    = 1U << 3
+        OccludedCpu  = 1U << 0, // frustum culling
+        OccludedGpu  = 1U << 1, // occlusion culling (depth culling)
+        Occluder     = 1U << 2,
+        CastsShadows = 1U << 3
     };
 
     class SP_CLASS Renderable : public Component
@@ -69,7 +69,7 @@ namespace Spartan
             uint32_t index_offset  = 0, uint32_t index_count  = 0,
             uint32_t vertex_offset = 0, uint32_t vertex_count = 0
         );
-        void SetGeometry(const Renderer_MeshType mesh_type);
+        void SetGeometry(const MeshType type);
         void GetGeometry(std::vector<uint32_t>* indices, std::vector<RHI_Vertex_PosTexNorTan>* vertices) const;
 
         // bounding box
@@ -101,16 +101,16 @@ namespace Spartan
         uint32_t GetInstanceCount()  const          { return static_cast<uint32_t>(m_instances.size()); }
         void SetInstances(const std::vector<Math::Matrix>& instances);
 
-        // properties
+        // misc
         uint32_t GetIndexOffset() const  { return m_geometry_index_offset; }
         uint32_t GetIndexCount() const   { return m_geometry_index_count; }
         uint32_t GetVertexOffset() const { return m_geometry_vertex_offset; }
         uint32_t GetVertexCount() const  { return m_geometry_vertex_count; }
-        bool ReadyToRender() const;
-        bool IsVisible() { return IsFlagSet(RenderableFlags::IsInViewFrustum) && !IsFlagSet(RenderableFlags::IsOccludee); }
+        bool IsVisible() const           { return !(m_flags & RenderableFlags::OccludedCpu) && !(m_flags & RenderableFlags::OccludedGpu); }
+        bool HasMesh() const             { return m_mesh != nullptr; }
 
         // flags
-        bool IsFlagSet(const RenderableFlags flag) { return m_flags & flag; }
+        bool HasFlag(const RenderableFlags flag) { return m_flags & flag; }
         void SetFlag(const RenderableFlags flag, const bool enable = true);
 
     private:
@@ -137,6 +137,6 @@ namespace Spartan
 
         // misc
         Math::Matrix m_transform_previous = Math::Matrix::Identity;
-        uint32_t m_flags                  = RenderableFlags::IsInViewFrustum | RenderableFlags::CastsShadows;
+        uint32_t m_flags                  = RenderableFlags::CastsShadows;
     };
 }

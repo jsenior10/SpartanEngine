@@ -27,21 +27,20 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 namespace Spartan
 {
-    #define debug_color Math::Vector4(0.41f, 0.86f, 1.0f, 1.0f)
+    // we are using double buffering so 5 is enough
     constexpr uint8_t resources_frame_lifetime = 5;
-    constexpr uint8_t shader_count             = 54;
 
     enum class Renderer_Option : uint32_t
     {
-        Debug_Aabb,
-        Debug_PickingRay,
-        Debug_Grid,
-        Debug_TransformHandle,
-        Debug_SelectionOutline,
-        Debug_Lights,
-        Debug_PerformanceMetrics,
-        Debug_Physics,
-        Debug_Wireframe,
+        Aabb,
+        PickingRay,
+        Grid,
+        TransformHandle,
+        SelectionOutline,
+        Lights,
+        PerformanceMetrics,
+        Physics,
+        Wireframe,
         Bloom,
         Fog,
         FogVolumetric,
@@ -52,18 +51,20 @@ namespace Spartan
         DepthOfField,
         FilmGrain,
         ChromaticAberration,
-        Debanding,
         Anisotropy,
         ShadowResolution,
-        Gamma,
         Exposure,
-        PaperWhite,
+        WhitePoint,
         Antialiasing,
         Tonemapping,
         Upsampling,
         Sharpness,
         Hdr,
         Vsync,
+        VariableRateShading,
+        ResolutionScale,
+        DynamicResolution,
+        OcclusionCulling,
         Max
     };
 
@@ -84,19 +85,18 @@ namespace Spartan
 
     enum class Renderer_Tonemapping : uint32_t
     {
-        Amd,
         Aces,
+        NautilusACES,
         Reinhard,
         Uncharted2,
         Matrix,
-        Realism,
         Max,
     };
 
     enum class Renderer_Upsampling : uint32_t
     {
         Linear,
-        FSR2
+        Fsr2
     };
 
     enum class Renderer_BindingsCb
@@ -107,46 +107,43 @@ namespace Spartan
     enum class Renderer_BindingsSrv
     {
         // g-buffer
-        gbuffer_albedo       = 0,
-        gbuffer_normal       = 1,
-        gbuffer_material     = 2,
-        gbuffer_velocity     = 3,
-        gbuffer_depth        = 4,
-        gbuffer_depth_opaque = 5,
+        gbuffer_albedo         = 0,
+        gbuffer_normal         = 1,
+        gbuffer_material       = 2,
+        gbuffer_velocity       = 3,
+        gbuffer_depth          = 4,
+        gbuffer_depth_backface = 5,
+        gbuffer_depth_opaque   = 6,
 
         // lighting
-        light_diffuse              = 6,
-        light_diffuse_transparent  = 7,
-        light_specular             = 8,
-        light_specular_transparent = 9,
-        light_volumetric           = 10,
+        light_diffuse              = 7,
+        light_diffuse_transparent  = 8,
+        light_specular             = 9,
+        light_specular_transparent = 10,
+        light_volumetric           = 11,
     
         // light depth/color maps
-        light_directional_depth = 11,
-        light_directional_color = 12,
-        light_point_depth       = 13,
-        light_point_color       = 14,
-        light_spot_depth        = 15,
-        light_spot_color        = 16,
+        light_depth = 12,
+        light_color = 13,
     
         // noise
-        noise_normal = 17,
-        noise_blue   = 18,
+        noise_normal = 14,
+        noise_blue   = 15,
     
         // misc
-        lutIbl           = 19,
-        environment      = 20,
-        ssgi             = 21,
-        ssr              = 22,
-        frame            = 23,
-        tex              = 24,
-        tex2             = 25,
-        font_atlas       = 26,
-        reflection_probe = 27,
-        sss              = 28,
+        lutIbl           = 16,
+        environment      = 17,
+        ssgi             = 18,
+        ssr              = 19,
+        frame            = 20,
+        tex              = 21,
+        tex2             = 22,
+        font_atlas       = 23,
+        reflection_probe = 24,
+        sss              = 25,
 
         // bindless
-        materials = 29
+        materials = 26
     };
 
     enum class Renderer_BindingsUav
@@ -156,22 +153,22 @@ namespace Spartan
         tex               = 2,
         tex2              = 3,
         tex3              = 4,
-        tex_sss           = 5,
-        sb_spd            = 6,
-        tex_spd           = 7,
+        tex_uint          = 5,
+        tex_sss           = 6,
+        sb_spd            = 7,
+        tex_spd           = 8,
     };
 
     enum class Renderer_Shader : uint8_t
     {
+        tessellation_h,
+        tessellation_d,
         gbuffer_v,
-        gbuffer_instanced_v,
         gbuffer_p,
         depth_prepass_v,
-        depth_prepass_instanced_v,
         depth_prepass_alpha_test_p,
         depth_light_v,
-        depth_light_instanced_v,
-        depth_light_p,
+        depth_light_alpha_color_p,
         quad_v,
         quad_p,
         fxaa_c,
@@ -183,8 +180,7 @@ namespace Spartan
         bloom_downsample_c,
         bloom_blend_frame_c,
         bloom_upsample_blend_mip_c,
-        tonemapping_gamma_correction_c,
-        debanding_c,
+        output_c,
         light_integration_brdf_specular_lut_c,
         light_integration_environment_filter_c,
         light_c,
@@ -192,6 +188,7 @@ namespace Spartan
         light_image_based_c,
         line_v,
         line_p,
+        grid_v,
         grid_p,
         outline_v,
         outline_p,
@@ -202,11 +199,11 @@ namespace Spartan
         ssr_c,
         sss_c_bend,
         skysphere_c,
-        taa_c,
         blur_gaussian_c,
         blur_gaussian_bilaterial_c,
         blur_gaussian_bilaterial_radius_from_texture_c,
         antiflicker_c,
+        variable_rate_shading_c,
         ffx_cas_c,
         ffx_spd_average_c,
         ffx_spd_highest_c,
@@ -214,7 +211,7 @@ namespace Spartan
         max
     };
     
-    enum class Renderer_RenderTexture : uint8_t
+    enum class Renderer_RenderTarget : uint8_t
     {
         gbuffer_color,
         gbuffer_normal,
@@ -222,6 +219,8 @@ namespace Spartan
         gbuffer_velocity,
         gbuffer_depth,
         gbuffer_depth_opaque,
+        gbuffer_depth_backface,
+        gbuffer_depth_output,
         brdf_specular_lut,
         light_diffuse,
         light_diffuse_transparent,
@@ -231,7 +230,6 @@ namespace Spartan
         frame_render,
         frame_render_2,
         frame_render_opaque,
-        frame_render_history,
         frame_output,
         frame_output_2,
         ssgi,
@@ -240,18 +238,16 @@ namespace Spartan
         sss,
         skysphere,
         bloom,
-        scratch_blur,
-        scratch_antiflicker,
+        blur,
+        antiflicker,
         outline,
+        shading_rate,
         max
     };
 
     enum class Renderer_Entity
     {
-        Geometry,
-        GeometryInstanced,
-        GeometryTransparent,
-        GeometryTransparentInstanced,
+        Mesh,
         Light,
         Camera,
         AudioSource
@@ -282,33 +278,18 @@ namespace Spartan
     {
         Noise_normal,
         Noise_blue,
-        White,
-        Black,
-        Transparent,
         Checkerboard,
         Gizmo_light_directional,
         Gizmo_light_point,
         Gizmo_light_spot,
-        Gizmo_audio_source
-    };
-
-    enum class Renderer_MeshType
-    {
-        NotAssigned,
-        Cube,
-        Quad,
-        Grid,
-        Sphere,
-        Cylinder,
-        Cone,
-        Custom
+        Gizmo_audio_source,
+        Foam
     };
 
     enum class Renderer_RasterizerState
     {
-        Solid_cull_back,
-        Wireframe_cull_none,
-        Solid_cull_none,
+        Solid,
+        Wireframe,
         Light_point_spot,
         Light_directional
     };
@@ -316,15 +297,14 @@ namespace Spartan
     enum class Renderer_DepthStencilState
     {
         Off,
-        Stencil_read,
-        Depth_read_write_stencil_read,
-        Depth_read,
-        Depth_read_write_stencil_write
+        Read,
+        ReadWrite,
+        Max
     };
 
     enum class Renderer_BlendState
     {
-        Disabled,
+        Off,
         Alpha,
         Additive
     };

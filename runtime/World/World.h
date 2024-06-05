@@ -28,6 +28,19 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 namespace Spartan
 {
+    enum class DefaultWorld
+    {
+        Objects,
+        Car,
+        Forest,
+        Sponza,
+        Doom,
+        Bistro,
+        Minecraft,
+        LivingRoom,
+        Max
+    };
+
     class SP_CLASS World
     {
     public:
@@ -39,14 +52,6 @@ namespace Spartan
         // io
         static bool SaveToFile(const std::string& filePath);
         static bool LoadFromFile(const std::string& file_path);
-
-        // default worlds
-        static void CreateDefaultWorldObjects();
-        static void CreateDefaultWorldCar();
-        static void CreateDefaultWorldForest();
-        static void CreateDefaultWorldSponza();
-        static void CreateDefaultWorldDoomE1M1();
-        static void TickDefaultWorlds();
 
         // entities
         static std::shared_ptr<Entity> CreateEntity();
@@ -60,10 +65,20 @@ namespace Spartan
         // misc
         static void New();
         static void Resolve();
+        static void LoadDefaultWorld(DefaultWorld default_world);
         static const std::string GetName();
         static const std::string& GetFilePath();
 
     private:
         static void Clear();
+        static void TickDefaultWorlds();
+        static void CreateDefaultWorldObjects();
+        static void CreateDefaultWorldCar();
+        static void CreateDefaultWorldForest();
+        static void CreateDefaultWorldSponza();
+        static void CreateDefaultWorldDoom();
+        static void CreateDefaultWorldBistro();
+        static void CreateDefaultWorldMinecraft();
+        static void CreateDefaultWorldLivingRoom();
     };
 }

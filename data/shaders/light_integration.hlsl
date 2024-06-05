@@ -42,7 +42,7 @@ float2 hammersley(uint i, uint n)
 
 float3 importance_sample_ggx(float2 Xi, float3 N, float roughness)
 {
-    float a = roughness*roughness;
+    float a = roughness * roughness;
     
     float phi      = 2.0 * PI * Xi.x;
     float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a*a - 1.0) * Xi.y));
@@ -122,6 +122,7 @@ float2 integrate_brdf(float n_dot_v, float roughness)
     
     A /= float(sample_count);
     B /= float(sample_count);
+    
     return float2(A, B);
 }
 
@@ -155,12 +156,18 @@ float3 prefilter_environment(float2 uv)
         float n_dot_l = saturate(dot(N, L));
         if (n_dot_l > 0.0)
         {
-            float phi    = atan2(L.z, L.x) + PI;
-            float theta  = acos(L.y);
-            float u      = (phi + PI) / (2.0 * PI);
-            float v      = 1.0 - (theta / PI);
+            // compute uv
+            phi     = atan2(L.z, L.x) + PI;
+            theta   = acos(L.y);
+            float u = (phi / (2.0 * PI)) + 0.5; // shifting UV by half the texture width
+            u       = fmod(u, 1.0);             // wrap manually if u goes out of bounds
+            float v = 1.0 - (theta / PI);
 
-            color        += tex_environment.SampleLevel(samplers[sampler_bilinear_wrap], float2(u, v), 0).rgb * n_dot_l;
+            // sample
+            float mip_level_previous = mip_level - 1;
+            color += tex_environment.SampleLevel(samplers[sampler_bilinear_clamp], float2(u, v), mip_level_previous).rgb * n_dot_l;
+
+            // accumulate weight
             total_weight += n_dot_l;
         }
     }
@@ -169,12 +176,14 @@ float3 prefilter_environment(float2 uv)
 }
 
 [numthreads(THREAD_GROUP_COUNT_X, THREAD_GROUP_COUNT_Y, 1)]
-void mainCS(uint3 thread_id : SV_DispatchThreadID)
+void main_cs(uint3 thread_id : SV_DispatchThreadID)
 {
-    if (any(int2(thread_id.xy) >= pass_get_resolution_out()))
+    float2 resolution_out;
+    tex_uav.GetDimensions(resolution_out.x, resolution_out.y);
+    if (any(int2(thread_id.xy) >= resolution_out))
         return;
 
-    const float2 uv = (thread_id.xy + 0.5f) / pass_get_resolution_out();
+    const float2 uv = (thread_id.xy + 0.5f) / resolution_out;
     float4 color    = 1.0f;
 
     #if BRDF_SPECULAR_LUT
@@ -187,3 +196,4 @@ void mainCS(uint3 thread_id : SV_DispatchThreadID)
 
     tex_uav[thread_id.xy] = color;
 }
+

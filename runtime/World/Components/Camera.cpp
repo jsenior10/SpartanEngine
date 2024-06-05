@@ -42,7 +42,7 @@ namespace Spartan
 {
     Camera::Camera(weak_ptr<Entity> entity) : Component(entity)
     {
-
+        m_entity_ptr->SetPosition(Vector3(0.0f, 3.0f, -5.0f));
     }
 
     void Camera::OnInitialize()
@@ -391,7 +391,7 @@ namespace Spartan
         }
 
         // mouse look
-        if (m_is_controlled_by_keyboard_mouse || Input::IsControllerConnected())
+        if (m_is_controlled_by_keyboard_mouse || Input::IsGamepadConnected())
         {
             // wrap around left and right screen edges (to allow for infinite scrolling)
             if (m_is_controlled_by_keyboard_mouse)
@@ -425,10 +425,10 @@ namespace Spartan
                 // accumulate rotation
                 m_first_person_rotation += m_mouse_smoothed;
             }
-            else if (Input::IsControllerConnected())
+            else if (Input::IsGamepadConnected())
             {
-                m_first_person_rotation.x += Input::GetControllerThumbStickRight().x;
-                m_first_person_rotation.y += Input::GetControllerThumbStickRight().y;
+                m_first_person_rotation.x += Input::GetGamepadThumbStickRight().x;
+                m_first_person_rotation.y += Input::GetGamepadThumbStickRight().y;
             }
 
             // clamp rotation along the x-axis (but not exactly at 90 degrees, this is to avoid a gimbal lock)
@@ -444,7 +444,7 @@ namespace Spartan
         }
 
         // directional movement
-        if (m_is_controlled_by_keyboard_mouse || Input::IsControllerConnected())
+        if (m_is_controlled_by_keyboard_mouse || Input::IsGamepadConnected())
         {
             if (m_is_controlled_by_keyboard_mouse)
             {
@@ -455,12 +455,12 @@ namespace Spartan
                 if (Input::GetKey(KeyCode::Q)) movement_direction += GetEntity()->GetDown();
                 if (Input::GetKey(KeyCode::E)) movement_direction += GetEntity()->GetUp();
             }
-            else if (Input::IsControllerConnected())
+            else if (Input::IsGamepadConnected())
             {
-                movement_direction += GetEntity()->GetForward() * -Input::GetControllerThumbStickLeft().y;
-                movement_direction += GetEntity()->GetRight()   * Input::GetControllerThumbStickLeft().x;
-                movement_direction += GetEntity()->GetDown()    * Input::GetControllerTriggerLeft();
-                movement_direction += GetEntity()->GetUp()      * Input::GetControllerTriggerRight();
+                movement_direction += GetEntity()->GetForward() * -Input::GetGamepadThumbStickLeft().y;
+                movement_direction += GetEntity()->GetRight()   * Input::GetGamepadThumbStickLeft().x;
+                movement_direction += GetEntity()->GetDown()    * Input::GetGamepadTriggerLeft();
+                movement_direction += GetEntity()->GetUp()      * Input::GetGamepadTriggerRight();
             }
 
             // when in game mode and controlling a physics based camera ignore the pitch
@@ -555,7 +555,7 @@ namespace Spartan
                                     drag_force_y = -drag_force_y;
                                 }
 
-                                m_physics_body_to_control->ApplyForce(buoyancy_force * 1000.0f, PhysicsForce::Constant);
+                                m_physics_body_to_control->ApplyForce(buoyancy_force * 2500.0f, PhysicsForce::Constant);
                                 m_physics_body_to_control->ApplyForce(Vector3(0.0f, drag_force_y, 0.0f) * 200.0f, PhysicsForce::Constant);
                             }
 
@@ -570,7 +570,7 @@ namespace Spartan
                         {
                             if (is_grounded)
                             {
-                                m_physics_body_to_control->ApplyForce(Vector3::Up * 800.0f, PhysicsForce::Impulse);
+                                m_physics_body_to_control->ApplyForce(Vector3::Up * 400.0f, PhysicsForce::Impulse);
                             }
                         }
                     }

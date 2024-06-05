@@ -22,8 +22,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //= INCLUDES ==========================
 #include "pch.h"
 #include "../RHI_Device.h"
+#include "../RHI_Queue.h"
 #include "../RHI_Implementation.h"
-#include "../RHI_CommandList.h"
 #include "../RHI_Pipeline.h"
 #include "../RHI_VertexBuffer.h"
 #include "../RHI_IndexBuffer.h"
@@ -33,9 +33,9 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../RHI_DescriptorSet.h"
 #include "../RHI_DescriptorSetLayout.h"
 #include "../RHI_Semaphore.h"
-#include "../RHI_Fence.h"
 #include "../RHI_SwapChain.h"
 #include "../RHI_RasterizerState.h"
+#include "../RHI_DepthStencilState.h"
 #include "../Rendering/Renderer.h"
 #include "../../Profiling/Profiler.h"
 //=====================================
@@ -71,157 +71,178 @@ namespace Spartan
             return VK_ATTACHMENT_LOAD_OP_CLEAR;
         };
 
-        VkPipelineStageFlags layout_to_access_mask(const VkImageLayout layout, const bool is_destination_mask)
+        VkAccessFlags2 layout_to_access_mask(const VkImageLayout layout, const bool is_destination_mask, const bool is_depth)
         {
-            VkPipelineStageFlags access_mask = 0;
+            VkAccessFlags2 access_mask = 0;
 
             switch (layout)
             {
             case VK_IMAGE_LAYOUT_UNDEFINED:
-                SP_ASSERT(!is_destination_mask && "The new layout used in a transition must not be VK_IMAGE_LAYOUT_UNDEFINED.");
+                // a newly created swapchain will have an undefined layout and if use a 0 mask the validation layer
+                // will complain so we add a generic access mask that's harmless for VK_IMAGE_LAYOUT_UNDEFINED transitions
+                if (!is_destination_mask)
+                {
+                    access_mask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+                }
+                else
+                {
+                    SP_ASSERT(!is_destination_mask && "The new layout used in a transition must not be VK_IMAGE_LAYOUT_UNDEFINED.");
+                }
                 break;
 
             case VK_IMAGE_LAYOUT_PREINITIALIZED:
                 SP_ASSERT(!is_destination_mask && "The new layout used in a transition must not be VK_IMAGE_LAYOUT_PREINITIALIZED.");
-                access_mask = VK_ACCESS_HOST_WRITE_BIT;
+                access_mask = VK_ACCESS_2_HOST_WRITE_BIT;
                 break;
 
+            // When transitioning the image to VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR or VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            // there is no need to delay subsequent processing, or perform any visibility operations (as vkQueuePresentKHR
+            // performs automatic visibility operations). To achieve this, the dstAccessMask member of the VkImageMemoryBarrier
+            // should be set to 0, and the dstStageMask parameter should be set to VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT.
             case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
                 access_mask = VK_ACCESS_2_NONE;
                 break;
 
                 // transfer
             case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
-                access_mask = VK_ACCESS_TRANSFER_READ_BIT;
+                access_mask = VK_ACCESS_2_TRANSFER_READ_BIT;
                 break;
 
             case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
-                access_mask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                access_mask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
                 break;
 
-                // color attachments
-            case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
-                access_mask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+             // attachments
+            case VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL:
+                if (is_depth)
+                {
+                    access_mask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT_KHR | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT_KHR;
+                }
+                else
+                { 
+                    access_mask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT_KHR | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT_KHR;
+                }
                 break;
 
-                // depth attachments
-            case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL:
-                access_mask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-                break;
-
-            case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
-                access_mask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-                break;
-
-            case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL:
-                access_mask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
-                break;
-
-            case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL:
-                access_mask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+            case VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR:
+                access_mask = VK_ACCESS_2_FRAGMENT_SHADING_RATE_ATTACHMENT_READ_BIT_KHR;
                 break;
 
                 // shader reads
             case VK_IMAGE_LAYOUT_GENERAL:
-                access_mask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                access_mask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
                 break;
 
             case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
-                access_mask = VK_ACCESS_SHADER_READ_BIT;
+                access_mask = VK_ACCESS_2_SHADER_READ_BIT;
                 break;
 
             case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL:
-                access_mask = VK_ACCESS_SHADER_READ_BIT;
-                break;
-
-            case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
-                access_mask = VK_ACCESS_SHADER_READ_BIT;
+                access_mask = VK_ACCESS_2_SHADER_READ_BIT;
                 break;
 
             default:
-                SP_LOG_ERROR("Unexpected image layout");
+                SP_ASSERT_MSG(false, "Unhandled layout");
                 break;
             }
 
             return access_mask;
         }
 
-        VkPipelineStageFlags access_flags_to_pipeline_stage(VkAccessFlags access_flags)
+        VkPipelineStageFlags2 access_mask_to_pipeline_stage_mask(VkAccessFlags2 access_flags)
         {
-            VkPipelineStageFlags stages = 0;
+            VkPipelineStageFlags2 stages     = 0;
             uint32_t enabled_graphics_stages = RHI_Device::GetEnabledGraphicsStages();
 
             while (access_flags != 0)
             {
-                VkAccessFlagBits access_flag = static_cast<VkAccessFlagBits>(access_flags & (~(access_flags - 1)));
+                VkAccessFlagBits2 access_flag = static_cast<VkAccessFlagBits2>(access_flags & (~(access_flags - 1)));
                 SP_ASSERT(access_flag != 0 && (access_flag & (access_flag - 1)) == 0);
                 access_flags &= ~access_flag;
 
                 switch (access_flag)
                 {
-                case VK_ACCESS_INDIRECT_COMMAND_READ_BIT:
-                    stages |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+                case VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT:
+                    stages |= VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
                     break;
 
-                case VK_ACCESS_INDEX_READ_BIT:
-                    stages |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+                case VK_ACCESS_2_INDEX_READ_BIT:
+                    stages |= VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT;
                     break;
 
-                case VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT:
-                    stages |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+                case VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT:
+                    stages |= VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT;
                     break;
 
-                case VK_ACCESS_UNIFORM_READ_BIT:
-                    stages |= enabled_graphics_stages | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+                case VK_ACCESS_2_UNIFORM_READ_BIT:
+                    stages |= enabled_graphics_stages | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
                     break;
 
-                case VK_ACCESS_INPUT_ATTACHMENT_READ_BIT:
-                    stages |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+                case VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT:
+                    stages |= VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
                     break;
 
                     // shader
-                case VK_ACCESS_SHADER_READ_BIT:
-                    stages |= enabled_graphics_stages | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+                case VK_ACCESS_2_SHADER_READ_BIT:
+                    stages |= enabled_graphics_stages | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
                     break;
 
-                case VK_ACCESS_SHADER_WRITE_BIT:
-                    stages |= enabled_graphics_stages | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+                case VK_ACCESS_2_SHADER_WRITE_BIT:
+                    stages |= enabled_graphics_stages | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
                     break;
 
-                    // color attachments
-                case VK_ACCESS_COLOR_ATTACHMENT_READ_BIT:
-                    stages |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                    // attachments - color
+                case VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT:
+                    stages |= VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
                     break;
 
-                case VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT:
-                    stages |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                case VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT:
+                    stages |= VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
                     break;
 
-                    // depth-stencil attachments
-                case VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT:
-                    stages |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+                    // attachments - depth/stencil
+                case VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT:
+                    stages |= VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
                     break;
 
-                case VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT:
-                    stages |= VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+                    // attachments - shading rate
+                case VK_ACCESS_2_FRAGMENT_SHADING_RATE_ATTACHMENT_READ_BIT_KHR:
+                    stages |= VK_PIPELINE_STAGE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
+                    break;
+
+                case VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT:
+                    stages |= VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
                     break;
 
                     // transfer
-                case VK_ACCESS_TRANSFER_READ_BIT:
-                    stages |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+                case VK_ACCESS_2_TRANSFER_READ_BIT:
+                    stages |= VK_PIPELINE_STAGE_2_TRANSFER_BIT;
                     break;
 
-                case VK_ACCESS_TRANSFER_WRITE_BIT:
-                    stages |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+                case VK_ACCESS_2_TRANSFER_WRITE_BIT:
+                    stages |= VK_PIPELINE_STAGE_2_TRANSFER_BIT;
                     break;
 
                     // host
-                case VK_ACCESS_HOST_READ_BIT:
-                    stages |= VK_PIPELINE_STAGE_HOST_BIT;
+                case VK_ACCESS_2_HOST_READ_BIT:
+                    stages |= VK_PIPELINE_STAGE_2_HOST_BIT;
                     break;
 
-                case VK_ACCESS_HOST_WRITE_BIT:
-                    stages |= VK_PIPELINE_STAGE_HOST_BIT;
+                case VK_ACCESS_2_HOST_WRITE_BIT:
+                    stages |= VK_PIPELINE_STAGE_2_HOST_BIT;
+                    break;
+
+                    // misc
+                case VK_ACCESS_2_MEMORY_READ_BIT:
+                    stages |= VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+                    break;
+
+                case VK_ACCESS_2_MEMORY_WRITE_BIT:
+                    stages |= VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+                    break;
+
+                default:
+                    SP_ASSERT_MSG(false, "Unhandled access flag");
                     break;
                 }
             }
@@ -251,230 +272,285 @@ namespace Spartan
 
             return aspect_mask;
         }
+    }
 
-        namespace descriptor_sets
+    namespace descriptor_sets
+    {
+        bool bind_dynamic = false;
+
+        void set_dynamic(const RHI_PipelineState pso, void* resource, void* pipeline_layout, RHI_DescriptorSetLayout* layout)
         {
-            bool dynamic_descriptor_needs_to_bind = false;
-
-            void set_dynamic(const RHI_PipelineState pso, void* resource, void* pipeline_layout, RHI_DescriptorSetLayout* layout)
+            array<void*, 1> resources =
             {
-                array<void*, 1> resources =
-                {
-                    layout->GetDescriptorSet()->GetResource()
-                };
+                layout->GetDescriptorSet()->GetResource()
+            };
 
-                // get dynamic offsets
-                array<uint32_t, 10> dynamic_offsets;
-                uint32_t dynamic_offset_count = 0;
-                layout->GetDynamicOffsets(&dynamic_offsets, &dynamic_offset_count);
+            // get dynamic offsets
+            array<uint32_t, 10> dynamic_offsets;
+            uint32_t dynamic_offset_count = 0;
+            layout->GetDynamicOffsets(&dynamic_offsets, &dynamic_offset_count);
 
-                VkPipelineBindPoint bind_point = pso.IsCompute() ? VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE : VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS;
-                vkCmdBindDescriptorSets
-                (
-                    static_cast<VkCommandBuffer>(resource),               // commandBuffer
-                    bind_point,                                           // pipelineBindPoint
-                    static_cast<VkPipelineLayout>(pipeline_layout),       // layout
-                    0,                                                    // firstSet
-                    static_cast<uint32_t>(resources.size()),              // descriptorSetCount
-                    reinterpret_cast<VkDescriptorSet*>(resources.data()), // pDescriptorSets
-                    dynamic_offset_count,                                 // dynamicOffsetCount
-                    dynamic_offsets.data()                                // pDynamicOffsets
-                );
+            VkPipelineBindPoint bind_point = pso.IsCompute() ? VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE : VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS;
+            vkCmdBindDescriptorSets
+            (
+                static_cast<VkCommandBuffer>(resource),               // commandBuffer
+                bind_point,                                           // pipelineBindPoint
+                static_cast<VkPipelineLayout>(pipeline_layout),       // layout
+                0,                                                    // firstSet
+                static_cast<uint32_t>(resources.size()),              // descriptorSetCount
+                reinterpret_cast<VkDescriptorSet*>(resources.data()), // pDescriptorSets
+                dynamic_offset_count,                                 // dynamicOffsetCount
+                dynamic_offsets.data()                                // pDynamicOffsets
+            );
 
-                Profiler::m_rhi_bindings_descriptor_set++;
-            }
+            bind_dynamic = false;
+            Profiler::m_rhi_bindings_descriptor_set++;
+        }
 
-            void set_bindless(const RHI_PipelineState pso, void* resource, void* pipeline_layout)
+        void set_bindless(const RHI_PipelineState pso, void* resource, void* pipeline_layout)
+        {
+            array<void*, 3> resources =
             {
-                array<void*, 3> resources =
-                {
-                    RHI_Device::GetDescriptorSet(RHI_Device_Resource::textures_material),
-                    RHI_Device::GetDescriptorSet(RHI_Device_Resource::sampler_comparison),
-                    RHI_Device::GetDescriptorSet(RHI_Device_Resource::sampler_regular)
-                };
+                RHI_Device::GetDescriptorSet(RHI_Device_Resource::textures_material),
+                RHI_Device::GetDescriptorSet(RHI_Device_Resource::sampler_comparison),
+                RHI_Device::GetDescriptorSet(RHI_Device_Resource::sampler_regular)
+            };
 
-                VkPipelineBindPoint bind_point = pso.IsCompute() ? VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE : VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS;
-                vkCmdBindDescriptorSets
-                (
-                    static_cast<VkCommandBuffer>(resource),               // commandBuffer
-                    bind_point,                                           // pipelineBindPoint
-                    static_cast<VkPipelineLayout>(pipeline_layout),       // layout
-                    1,                                                    // firstSet
-                    static_cast<uint32_t>(resources.size()),              // descriptorSetCount
-                    reinterpret_cast<VkDescriptorSet*>(resources.data()), // pDescriptorSets
-                    0,                                                    // dynamicOffsetCount
-                    nullptr                                               // pDynamicOffsets
-                );
+            VkPipelineBindPoint bind_point = pso.IsCompute() ? VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE : VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS;
+            vkCmdBindDescriptorSets
+            (
+                static_cast<VkCommandBuffer>(resource),               // commandBuffer
+                bind_point,                                           // pipelineBindPoint
+                static_cast<VkPipelineLayout>(pipeline_layout),       // layout
+                1,                                                    // firstSet
+                static_cast<uint32_t>(resources.size()),              // descriptorSetCount
+                reinterpret_cast<VkDescriptorSet*>(resources.data()), // pDescriptorSets
+                0,                                                    // dynamicOffsetCount
+                nullptr                                               // pDynamicOffsets
+            );
 
-                Profiler::m_rhi_bindings_descriptor_set++;
-            }
+            Profiler::m_rhi_bindings_descriptor_set++;
         }
     }
 
-    RHI_CommandList::RHI_CommandList(const RHI_Queue_Type queue_type, const uint64_t swapchain_id, void* cmd_pool, const char* name) : SpObject()
+    namespace queries
     {
-        m_timestamps.fill(0);
-        m_queue_type  = queue_type;
-        m_object_name = name;
+        namespace timestamp
+        {
+            array<uint64_t, rhi_max_queries_timestamps> data;
 
+            void update(void* query_pool, const uint32_t query_count)
+            {
+                if (Profiler::IsGpuTimingEnabled())
+                {
+                    vkGetQueryPoolResults(
+                        RHI_Context::device,                  // device
+                        static_cast<VkQueryPool>(query_pool), // queryPool
+                        0,                                    // firstQuery
+                        query_count,                          // queryCount
+                        query_count * sizeof(uint64_t),       // dataSize
+                        queries::timestamp::data.data(),      // pData
+                        sizeof(uint64_t),                     // stride
+                        VK_QUERY_RESULT_64_BIT                // flags
+                    );
+                }
+            }
+
+            void reset(void* cmd_list, void*& query_pool)
+            {
+                vkCmdResetQueryPool(static_cast<VkCommandBuffer>(cmd_list), static_cast<VkQueryPool>(query_pool), 0, rhi_max_queries_timestamps);
+            }
+        }
+
+        namespace occlusion
+        {
+            array<uint64_t, rhi_max_queries_occlusion> data;
+            unordered_map<uint64_t, uint32_t> id_to_index;
+            uint32_t index              = 0;
+            uint32_t index_active       = 0;
+            bool occlusion_query_active = false;
+
+            void update(void* query_pool, const uint32_t query_count)
+            {
+                vkGetQueryPoolResults(
+                    RHI_Context::device,                                 // device
+                    static_cast<VkQueryPool>(query_pool),                // queryPool
+                    0,                                                   // firstQuery
+                    query_count,                                         // queryCount
+                    query_count * sizeof(uint64_t),                      // dataSize
+                    queries::occlusion::data.data(),                     // pData
+                    sizeof(uint64_t),                                    // stride
+                    VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_PARTIAL_BIT // flags
+                );
+            }
+
+            void reset(void* cmd_list, void*& query_pool)
+            {
+                vkCmdResetQueryPool(static_cast<VkCommandBuffer>(cmd_list), static_cast<VkQueryPool>(query_pool), 0, rhi_max_queries_occlusion);
+            }
+        }
+
+        void initialize(void*& pool_timestamp, void*& pool_occlusion)
+        {
+            // timestamps
+            if (Profiler::IsGpuTimingEnabled())
+            {
+                VkQueryPoolCreateInfo query_pool_info = {};
+                query_pool_info.sType                 = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+                query_pool_info.queryType             = VK_QUERY_TYPE_TIMESTAMP;
+                query_pool_info.queryCount            = rhi_max_queries_timestamps;
+
+                auto query_pool = reinterpret_cast<VkQueryPool*>(&pool_timestamp);
+                SP_ASSERT_VK_MSG(vkCreateQueryPool(RHI_Context::device, &query_pool_info, nullptr, query_pool),
+                    "Failed to created timestamp query pool");
+
+                RHI_Device::SetResourceName(pool_timestamp, RHI_Resource_Type::QueryPool, "query_pool_timestamp");
+            }
+
+            // occlusion
+            {
+                VkQueryPoolCreateInfo query_pool_info = {};
+                query_pool_info.sType                 = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+                query_pool_info.queryType             = VK_QUERY_TYPE_OCCLUSION;
+                query_pool_info.queryCount            = rhi_max_queries_occlusion;
+
+                auto query_pool = reinterpret_cast<VkQueryPool*>(&pool_occlusion);
+                SP_ASSERT_VK_MSG(vkCreateQueryPool(RHI_Context::device, &query_pool_info, nullptr, query_pool),
+                    "Failed to created occlusion query pool");
+
+                RHI_Device::SetResourceName(pool_occlusion, RHI_Resource_Type::QueryPool, "query_pool_occlusion");
+            }
+
+            timestamp::data.fill(0);
+            occlusion::data.fill(0);
+        }
+
+        void shutdown(void*& pool_timestamp, void*& pool_occlusion)
+        {
+            RHI_Device::DeletionQueueAdd(RHI_Resource_Type::QueryPool, pool_timestamp);
+            RHI_Device::DeletionQueueAdd(RHI_Resource_Type::QueryPool, pool_occlusion);
+        }
+    }
+
+    RHI_CommandList::RHI_CommandList(void* cmd_pool, const char* name)
+    {
         // command buffer
         {
+            // define
             VkCommandBufferAllocateInfo allocate_info = {};
             allocate_info.sType                       = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
             allocate_info.commandPool                 = static_cast<VkCommandPool>(cmd_pool);
             allocate_info.level                       = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
             allocate_info.commandBufferCount          = 1;
 
-            // Allocate
-            SP_VK_ASSERT_MSG(vkAllocateCommandBuffers(RHI_Context::device, &allocate_info, reinterpret_cast<VkCommandBuffer*>(&m_rhi_resource)),
+            // allocate
+            SP_ASSERT_VK_MSG(vkAllocateCommandBuffers(RHI_Context::device, &allocate_info, reinterpret_cast<VkCommandBuffer*>(&m_rhi_resource)),
                 "Failed to allocate command buffer");
 
-            // Name
+            // name
             RHI_Device::SetResourceName(static_cast<void*>(m_rhi_resource), RHI_Resource_Type::CommandList, name);
         }
 
-        // query pool
-        if (Profiler::IsGpuTimingEnabled())
-        {
-            VkQueryPoolCreateInfo query_pool_create_info = {};
-            query_pool_create_info.sType                 = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-            query_pool_create_info.queryType             = VK_QUERY_TYPE_TIMESTAMP;
-            query_pool_create_info.queryCount            = m_max_timestamps;
+        // semaphores
+        m_rendering_complete_semaphore          = make_shared<RHI_Semaphore>(false, name);
+        m_rendering_complete_semaphore_timeline = make_shared<RHI_Semaphore>(true, name);
 
-            auto query_pool = reinterpret_cast<VkQueryPool*>(&m_rhi_query_pool);
-            SP_VK_ASSERT_MSG(vkCreateQueryPool(RHI_Context::device, &query_pool_create_info, nullptr, query_pool),
-                "Failed to created query pool");
-
-            m_timestamps.fill(0);
-        }
-
-        // sync objects
-        m_proccessed_fence = make_shared<RHI_Fence>(name);
-
-        // semaphore
-        bool presents_to_swapchain = swapchain_id != 0;
-        if (presents_to_swapchain)
-        {
-            m_proccessed_semaphore = make_shared<RHI_Semaphore>(false, name);
-        }
+        queries::initialize(m_rhi_query_pool_timestamps, m_rhi_query_pool_occlusion);
     }
 
     RHI_CommandList::~RHI_CommandList()
     {
-        m_proccessed_fence     = nullptr;
-        m_proccessed_semaphore = nullptr;
-
-        if (m_rhi_query_pool)
-        {
-            RHI_Device::DeletionQueueAdd(RHI_Resource_Type::QueryPool, m_rhi_query_pool);
-            m_rhi_query_pool = nullptr;
-        }
+        queries::shutdown(m_rhi_query_pool_timestamps, m_rhi_query_pool_occlusion);
     }
 
-    void RHI_CommandList::Begin()
+    void RHI_CommandList::Begin(const RHI_Queue* queue)
     {
-        SP_ASSERT(m_state == RHI_CommandListState::Idle);
-
-        // get queries
-        if (Profiler::IsGpuTimingEnabled() && m_queue_type != RHI_Queue_Type::Copy)
+        if (m_state == RHI_CommandListState::Recording)
         {
-            if (m_timestamp_index != 0)
-            {
-                const uint32_t query_count     = m_timestamp_index;
-                const size_t stride            = sizeof(uint64_t);
-                const VkQueryResultFlags flags = VK_QUERY_RESULT_64_BIT;
-
-                vkGetQueryPoolResults(
-                    RHI_Context::device,                        // device
-                    static_cast<VkQueryPool>(m_rhi_query_pool), // queryPool
-                    0,                                          // firstQuery
-                    query_count,                                // queryCount
-                    query_count * stride,                       // dataSize
-                    m_timestamps.data(),                        // pData
-                    stride,                                     // stride
-                    flags                                       // flags
-                );
-            }
-
-            m_timestamp_index = 0;
+            SP_LOG_WARNING("Discarding all previously recorded commands as the command list is already in recording state...");
+        }
+ 
+        if (queue->GetType() != RHI_Queue_Type::Copy && m_timestamp_index != 0)
+        {
+            queries::timestamp::update(m_rhi_query_pool_timestamps, m_timestamp_index);
         }
 
         // begin command buffer
         VkCommandBufferBeginInfo begin_info = {};
         begin_info.sType                    = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        begin_info.flags                    = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         SP_ASSERT_MSG(vkBeginCommandBuffer(static_cast<VkCommandBuffer>(m_rhi_resource), &begin_info) == VK_SUCCESS, "Failed to begin command buffer");
 
-        // reset query pool - has to be done after vkBeginCommandBuffer or a VK_DEVICE_LOST will occur
-        if (Profiler::IsGpuTimingEnabled() && m_queue_type != RHI_Queue_Type::Copy)
+        // set states
+        m_state        = RHI_CommandListState::Recording;
+        m_pso          = RHI_PipelineState();
+        m_cull_mode    = RHI_CullMode::Max;
+
+        // set dynamic states
+        if (queue->GetType() == RHI_Queue_Type::Graphics)
         {
-            vkCmdResetQueryPool(static_cast<VkCommandBuffer>(m_rhi_resource), static_cast<VkQueryPool>(m_rhi_query_pool), 0, m_max_timestamps);
+            // cull mode
+            SetCullMode(RHI_CullMode::Back);
+
+            // scissor rectangle
+            static Math::Rectangle scissor_rect;
+            scissor_rect.left   = 0.0f;
+            scissor_rect.top    = 0.0f;
+            scissor_rect.right  = static_cast<float>(m_pso.GetWidth());
+            scissor_rect.bottom = static_cast<float>(m_pso.GetHeight());
+            SetScissorRectangle(scissor_rect);
         }
 
-        // update states
-        m_state          = RHI_CommandListState::Recording;
-        m_pipeline_dirty = true;
+        // queries
+        if (queue->GetType() != RHI_Queue_Type::Copy)
+        {
+            // queries need to be reset before they are first used and they
+            // also need to be reset after every use, so we just reset them always
+            m_timestamp_index = 0;
+            queries::timestamp::reset(m_rhi_resource, m_rhi_query_pool_timestamps);
+            queries::occlusion::reset(m_rhi_resource, m_rhi_query_pool_occlusion);
+        }
     }
 
-    void RHI_CommandList::End()
+    void RHI_CommandList::Submit(RHI_Queue* queue, const uint64_t swapchain_id)
     {
         SP_ASSERT(m_state == RHI_CommandListState::Recording);
 
-        if (m_render_pass_active && m_pso.IsGraphics())
+        // end
+        RenderPassEnd(); // only happens if needed
+        SP_ASSERT_VK_MSG(vkEndCommandBuffer(static_cast<VkCommandBuffer>(m_rhi_resource)), "Failed to end command buffer");
+
+        // when minimized, or when entering/exiting fullscreen mode, the swapchain
+        // won't present, and won't wait for this semaphore, so we need to reset it
+        if (m_rendering_complete_semaphore->IsSignaled())
         {
-            EndRenderPass();
+            m_rendering_complete_semaphore = make_shared<RHI_Semaphore>(false, m_rendering_complete_semaphore_timeline->GetObjectName().c_str());
         }
 
-        SP_ASSERT_MSG(
-            vkEndCommandBuffer(static_cast<VkCommandBuffer>(m_rhi_resource)) == VK_SUCCESS,
-            "Failed to end command buffer"
+        queue->Submit(
+            static_cast<VkCommandBuffer>(m_rhi_resource), // cmd buffer
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,            // wait flags
+            m_rendering_complete_semaphore.get(),         // signal semaphore
+            m_rendering_complete_semaphore_timeline.get() // signal semaphore
         );
 
-        m_state = RHI_CommandListState::Ended;
-    }
-
-    void RHI_CommandList::Submit()
-    {
-        SP_ASSERT(m_state == RHI_CommandListState::Ended);
-
-        // we can reach this code path and have a submitted semaphore when exiting full screen
-        // it's okay to reset it manually here but ideally, we should find out why this happens
-        if (m_proccessed_semaphore && m_proccessed_semaphore->GetStateCpu() == RHI_Sync_State::Submitted)
-        {
-            m_proccessed_fence     = make_shared<RHI_Fence>(m_object_name.c_str());
-            m_proccessed_semaphore = make_shared<RHI_Semaphore>(false, m_object_name.c_str());
-        }
-
-        RHI_Device::QueueSubmit(
-            m_queue_type,                                  // queue
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, // wait flags
-            static_cast<VkCommandBuffer>(m_rhi_resource),  // cmd buffer
-            nullptr,                                       // wait semaphore
-            m_proccessed_semaphore.get(),                  // signal semaphore
-            m_proccessed_fence.get()                       // signal fence
-        );
-
-        m_state = RHI_CommandListState::Submitted;
+        m_swapchain_id = swapchain_id;
+        m_state        = RHI_CommandListState::Submitted;
     }
 
     void RHI_CommandList::SetPipelineState(RHI_PipelineState& pso)
     {
         SP_ASSERT(m_state == RHI_CommandListState::Recording);
 
+        // early exit if the pipeline state hasn't changed
+        pso.Prepare();
+        if (m_pso.GetHash() == pso.GetHash())
+            return;
+
         // get (or create) a pipeline which matches the requested pipeline state
-        RHI_Device::GetOrCreatePipeline(pso, m_pipeline, m_descriptor_layout_current);
-
-        uint64_t hash_previous = m_pso.GetHash();
-        m_pso                  = pso;
-
-        // determine if the pipeline is dirty
-        if (!m_pipeline_dirty)
-        {
-            m_pipeline_dirty = hash_previous != m_pso.GetHash();
-        }
+        m_pso = pso;
+        RHI_Device::GetOrCreatePipeline(m_pso, m_pipeline, m_descriptor_layout_current);
 
         // bind pipeline
-        if (m_pipeline_dirty)
         {
             // get vulkan pipeline object
             SP_ASSERT(m_pipeline != nullptr);
@@ -484,7 +560,6 @@ namespace Spartan
             // bind
             VkPipelineBindPoint pipeline_bind_point = m_pso.IsCompute() ? VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS;
             vkCmdBindPipeline(static_cast<VkCommandBuffer>(m_rhi_resource), pipeline_bind_point, vk_pipeline);
-            m_pipeline_dirty = false;
 
             // profile
             Profiler::m_rhi_bindings_pipeline++;
@@ -492,9 +567,13 @@ namespace Spartan
             // set some dynamic states
             if (m_pso.IsGraphics())
             {
-                m_cull_mode = RHI_CullMode::Max;
-                SetCullMode(m_pso.rasterizer_state->GetCullMode());
+                // cull mode
+                if (m_pso.rasterizer_state->GetPolygonMode() == RHI_PolygonMode::Wireframe)
+                {
+                    SetCullMode(RHI_CullMode::None);
+                }
 
+                // scissor rectangle
                 Math::Rectangle scissor_rect;
                 scissor_rect.left   = 0.0f;
                 scissor_rect.top    = 0.0f;
@@ -502,29 +581,29 @@ namespace Spartan
                 scissor_rect.bottom = static_cast<float>(m_pso.GetHeight());
                 SetScissorRectangle(scissor_rect);
 
-                m_index_buffer_id  = 0;
-                m_vertex_buffer_id = 0;
+                // vertex and index buffer state
+                m_buffer_id_index  = 0;
+                m_buffer_id_vertex = 0;
             }
         }
 
-        if (m_render_pass_active)
+        // bind descriptors
         {
-            EndRenderPass();
+            // set bindless descriptors
+            descriptor_sets::set_bindless(m_pso, m_rhi_resource, m_pipeline->GetResource_PipelineLayout());
+
+            // set standard resources (dynamic descriptors)
+            Renderer::SetStandardResources(this);
+            descriptor_sets::set_dynamic(m_pso, m_rhi_resource, m_pipeline->GetResource_PipelineLayout(), m_descriptor_layout_current);
         }
 
-        descriptor_sets::set_bindless(m_pso, m_rhi_resource, m_pipeline->GetResource_PipelineLayout());
-        descriptor_sets::dynamic_descriptor_needs_to_bind = true;
+        RenderPassBegin();
     }
 
-    void RHI_CommandList::BeginRenderPass()
+    void RHI_CommandList::RenderPassBegin()
     {
         SP_ASSERT(m_state == RHI_CommandListState::Recording);
-        SP_ASSERT_MSG(m_pso.IsGraphics(), "You can't use a render pass with a compute pipeline");
-
-        if (m_render_pass_active)
-        {
-            EndRenderPass();
-        }
+        RenderPassEnd();
 
         if (!m_pso.IsGraphics())
             return;
@@ -546,7 +625,7 @@ namespace Spartan
             if (swapchain)
             {
                 // transition to the appropriate layout
-                swapchain->SetLayout(RHI_Image_Layout::Color_Attachment, this);
+                swapchain->SetLayout(RHI_Image_Layout::Attachment, this);
 
                 VkRenderingAttachmentInfo color_attachment = {};
                 color_attachment.sType                     = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
@@ -568,16 +647,16 @@ namespace Spartan
                     if (rt == nullptr)
                         break;
 
-                    SP_ASSERT_MSG(rt->IsRenderTargetColor(), "The texture wasn't created with the RHI_Texture_RenderTarget flag and/or isn't a color format");
+                    SP_ASSERT_MSG(rt->IsRtv(), "The texture wasn't created with the RHI_Texture_RenderTarget flag and/or isn't a color format");
 
                     // transition to the appropriate layout
-                    rt->SetLayout(RHI_Image_Layout::Color_Attachment, this);
+                    rt->SetLayout(RHI_Image_Layout::Attachment, this);
 
                     VkRenderingAttachmentInfo color_attachment = {};
                     color_attachment.sType                     = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
-                    color_attachment.imageView                 = static_cast<VkImageView>(rt->GetRhiRtv(m_pso.render_target_color_texture_array_index));
+                    color_attachment.imageView                 = static_cast<VkImageView>(rt->GetRhiRtv(m_pso.render_target_array_index));
                     color_attachment.imageLayout               = vulkan_image_layout[static_cast<uint8_t>(rt->GetLayout(0))];
-                    color_attachment.loadOp                    = get_color_load_op(m_pso.clear_color[i]);
+                    color_attachment.loadOp                    = m_ignore_clear_values ? VK_ATTACHMENT_LOAD_OP_LOAD : get_color_load_op(m_pso.clear_color[i]);
                     color_attachment.storeOp                   = VK_ATTACHMENT_STORE_OP_STORE;
                     color_attachment.clearValue.color          = { m_pso.clear_color[i].r, m_pso.clear_color[i].g, m_pso.clear_color[i].b, m_pso.clear_color[i].a };
 
@@ -595,23 +674,21 @@ namespace Spartan
         if (m_pso.render_target_depth_texture != nullptr)
         {
             RHI_Texture* rt = m_pso.render_target_depth_texture;
-
-            SP_ASSERT_MSG(rt->GetWidth() == rendering_info.renderArea.extent.width, "The depth buffer doesn't match the output resolution");
-            SP_ASSERT(rt->IsRenderTargetDepthStencil());
-
-            // Transition to the appropriate layout
-            RHI_Image_Layout layout = rt->IsStencilFormat() ? RHI_Image_Layout::Depth_Stencil_Attachment : RHI_Image_Layout::Depth_Attachment;
-            if (m_pso.render_target_depth_texture_read_only)
-            {
-                layout = RHI_Image_Layout::Depth_Stencil_Read;
+            if (Renderer::GetOption<float>(Renderer_Option::ResolutionScale) == 1.0f)
+            { 
+                SP_ASSERT_MSG(rt->GetWidth() == rendering_info.renderArea.extent.width, "The depth buffer doesn't match the output resolution");
             }
+            SP_ASSERT(rt->IsDsv());
+
+            // transition to the appropriate layout
+            RHI_Image_Layout layout = RHI_Image_Layout::Attachment;
             rt->SetLayout(layout, this);
 
             attachment_depth_stencil.sType                           = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
-            attachment_depth_stencil.imageView                       = static_cast<VkImageView>(rt->GetRhiDsv(m_pso.render_target_depth_stencil_texture_array_index));
+            attachment_depth_stencil.imageView                       = static_cast<VkImageView>(rt->GetRhiDsv(m_pso.render_target_array_index));
             attachment_depth_stencil.imageLayout                     = vulkan_image_layout[static_cast<uint8_t>(rt->GetLayout(0))];
-            attachment_depth_stencil.loadOp                          = get_depth_load_op(m_pso.clear_depth);
-            attachment_depth_stencil.storeOp                         = VK_ATTACHMENT_STORE_OP_STORE;
+            attachment_depth_stencil.loadOp                          = m_ignore_clear_values ? VK_ATTACHMENT_LOAD_OP_LOAD : get_depth_load_op(m_pso.clear_depth);
+            attachment_depth_stencil.storeOp                         = m_pso.depth_stencil_state->GetDepthWriteEnabled() ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_NONE;
             attachment_depth_stencil.clearValue.depthStencil.depth   = m_pso.clear_depth;
             attachment_depth_stencil.clearValue.depthStencil.stencil = m_pso.clear_stencil;
 
@@ -625,27 +702,48 @@ namespace Spartan
             }
         }
 
-        // begin dynamic render pass instance
+        // variable rate shading
+        VkRenderingFragmentShadingRateAttachmentInfoKHR attachment_shading_rate = {};
+        if (m_pso.vrs_input_texture)
+        {
+            m_pso.vrs_input_texture->SetLayout(RHI_Image_Layout::Shading_Rate_Attachment, this);
+
+            attachment_shading_rate.sType                          = VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR;
+            attachment_shading_rate.imageView                      = static_cast<VkImageView>(m_pso.vrs_input_texture->GetRhiRtv());
+            attachment_shading_rate.imageLayout                    = vulkan_image_layout[static_cast<uint8_t>(m_pso.vrs_input_texture->GetLayout(0))];
+            attachment_shading_rate.shadingRateAttachmentTexelSize = { RHI_Device::PropertyGetMaxShadingRateTexelSizeX(), RHI_Device::PropertyGetMaxShadingRateTexelSizeY() };
+
+            rendering_info.pNext = &attachment_shading_rate;
+        }
+
+        // begin dynamic render pass
         vkCmdBeginRendering(static_cast<VkCommandBuffer>(m_rhi_resource), &rendering_info);
 
-        // set viewport
-        RHI_Viewport viewport = RHI_Viewport(
-            0.0f, 0.0f,
-            static_cast<float>(m_pso.GetWidth()),
-            static_cast<float>(m_pso.GetHeight())
-        );
-        SetViewport(viewport);
+        // set dynamic states
+        {
+            // variable rate shading
+            RHI_Device::SetVariableRateShading(this, m_pso.vrs_input_texture != nullptr);
 
-        m_render_pass_active = true;
+            // set viewport
+            RHI_Viewport viewport = RHI_Viewport(
+                0.0f, 0.0f,
+                static_cast<float>(m_pso.GetWidth()),
+                static_cast<float>(m_pso.GetHeight())
+            );
+            SetViewport(viewport);
+        }
+
+        m_render_pass_active  = true;
+        m_ignore_clear_values = true;
     }
 
-    void RHI_CommandList::EndRenderPass()
+    void RHI_CommandList::RenderPassEnd()
     {
-        if (m_render_pass_active)
-        {
-            vkCmdEndRendering(static_cast<VkCommandBuffer>(m_rhi_resource));
-            m_render_pass_active = false;
-        }
+        if (!m_render_pass_active)
+            return;
+
+        vkCmdEndRendering(static_cast<VkCommandBuffer>(m_rhi_resource));
+        m_render_pass_active = false;
 
         if (m_pso.render_target_swapchain)
         {
@@ -710,25 +808,18 @@ namespace Spartan
         vkCmdClearAttachments(static_cast<VkCommandBuffer>(m_rhi_resource), attachment_count, attachments.data(), 1, &clear_rect);
     }
 
-    void RHI_CommandList::ClearRenderTarget(RHI_Texture* texture,
-        const uint32_t color_index          /*= 0*/,
-        const uint32_t depth_stencil_index  /*= 0*/,
-        const bool storage                  /*= false*/,
-        const Color& clear_color            /*= rhi_color_load*/,
-        const float clear_depth             /*= rhi_depth_load*/,
-        const uint32_t clear_stencil        /*= rhi_stencil_load*/
+    void RHI_CommandList::ClearRenderTarget(
+        RHI_Texture* texture,
+        const Color& clear_color     /*= rhi_color_load*/,
+        const float clear_depth      /*= rhi_depth_load*/,
+        const uint32_t clear_stencil /*= rhi_stencil_load*/
     )
     {
         SP_ASSERT(m_state == RHI_CommandListState::Recording);
         SP_ASSERT_MSG((texture->GetFlags() & RHI_Texture_ClearBlit) != 0, "The texture needs the RHI_Texture_ClearBlit flag");
+        SP_ASSERT(texture && texture->GetRhiSrv());
 
-        if (!texture || !texture->GetRhiSrv())
-        {
-            SP_LOG_ERROR("Texture is null.");
-            return;
-        }
-
-        // One of the required layouts for clear functions
+        // one of the required layouts for clear functions
         texture->SetLayout(RHI_Image_Layout::Transfer_Destination, this);
 
         VkImageSubresourceRange image_subresource_range = {};
@@ -759,14 +850,21 @@ namespace Spartan
                 image_subresource_range.aspectMask |= VK_IMAGE_ASPECT_DEPTH_BIT;
             }
 
-            vkCmdClearDepthStencilImage(static_cast<VkCommandBuffer>(m_rhi_resource), static_cast<VkImage>(texture->GetRhiResource()), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_depth_stencil, 1, &image_subresource_range);
+            vkCmdClearDepthStencilImage(
+                static_cast<VkCommandBuffer>(m_rhi_resource),
+                static_cast<VkImage>(texture->GetRhiResource()),
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                &clear_depth_stencil,
+                1,
+                &image_subresource_range);
         }
     }
 
     void RHI_CommandList::Draw(const uint32_t vertex_count, const uint32_t vertex_start_index /*= 0*/)
     {
         SP_ASSERT(m_state == RHI_CommandListState::Recording);
-        OnPreDrawDispatch();
+
+        PreDraw();
 
         vkCmdDraw(
             static_cast<VkCommandBuffer>(m_rhi_resource), // commandBuffer
@@ -775,17 +873,14 @@ namespace Spartan
             vertex_start_index,                           // firstVertex
             0                                             // firstInstance
         );
-
-        if (Profiler::GetGranularity() == ProfilerGranularity::Full)
-        {
-            Profiler::m_rhi_draw++;
-        }
+        Profiler::m_rhi_draw++;
     }
 
     void RHI_CommandList::DrawIndexed(const uint32_t index_count, const uint32_t index_offset, const uint32_t vertex_offset, const uint32_t instance_start_index, const uint32_t instance_count)
     {
         SP_ASSERT(m_state == RHI_CommandListState::Recording);
-        OnPreDrawDispatch();
+
+        PreDraw();
 
         vkCmdDrawIndexed(
             static_cast<VkCommandBuffer>(m_rhi_resource), // commandBuffer
@@ -795,22 +890,22 @@ namespace Spartan
             vertex_offset,                                // vertexOffset
             instance_start_index                          // firstInstance
         );
-
-        if (Profiler::GetGranularity() == ProfilerGranularity::Full)
-        {
-            Profiler::m_rhi_draw++;
-        }
+        Profiler::m_rhi_draw++;
     }
 
-    void RHI_CommandList::Dispatch(uint32_t x, uint32_t y, uint32_t z /*= 1*/, bool async /*= false*/)
+    void RHI_CommandList::Dispatch(uint32_t x, uint32_t y, uint32_t z /*= 1*/)
     {
         SP_ASSERT(m_state == RHI_CommandListState::Recording);
-        OnPreDrawDispatch();
+
+        if (descriptor_sets::bind_dynamic)
+        {
+            descriptor_sets::set_dynamic(m_pso, m_rhi_resource, m_pipeline->GetResource_PipelineLayout(), m_descriptor_layout_current);
+        }
 
         vkCmdDispatch(static_cast<VkCommandBuffer>(m_rhi_resource), x, y, z);
     }
 
-    void RHI_CommandList::Blit(RHI_Texture* source, RHI_Texture* destination, const bool blit_mips)
+    void RHI_CommandList::Blit(RHI_Texture* source, RHI_Texture* destination, const bool blit_mips, const float source_scaling)
     {
         SP_ASSERT_MSG((source->GetFlags() & RHI_Texture_ClearBlit) != 0,      "The texture needs the RHI_Texture_ClearOrBlit flag");
         SP_ASSERT_MSG((destination->GetFlags() & RHI_Texture_ClearBlit) != 0, "The texture needs the RHI_Texture_ClearOrBlit flag");
@@ -828,8 +923,8 @@ namespace Spartan
         for (uint32_t mip_index = 0; mip_index < blit_region_count; mip_index++)
         {
             VkOffset3D& source_blit_size = blit_offsets_source[mip_index];
-            source_blit_size.x           = source->GetWidth()  >> mip_index;
-            source_blit_size.y           = source->GetHeight() >> mip_index;
+            source_blit_size.x           = static_cast<int32_t>(source->GetWidth()  * source_scaling) >> mip_index;
+            source_blit_size.y           = static_cast<int32_t>(source->GetHeight() * source_scaling) >> mip_index;
             source_blit_size.z           = 1;
 
             VkOffset3D& destination_blit_size = blit_offsets_destination[mip_index];
@@ -837,20 +932,17 @@ namespace Spartan
             destination_blit_size.y           = destination->GetHeight() >> mip_index;
             destination_blit_size.z           = 1;
 
-            SP_ASSERT_MSG(source_blit_size.x <= destination_blit_size.x && source_blit_size.y <= destination_blit_size.y,
-                "The source texture dimension(s) are larger than the those of the destination texture");
-
             VkImageBlit& blit_region                  = blit_regions[mip_index];
             blit_region.srcSubresource.mipLevel       = mip_index;
             blit_region.srcSubresource.baseArrayLayer = 0;
             blit_region.srcSubresource.layerCount     = 1;
-            blit_region.srcSubresource.aspectMask     = source->IsDepthFormat() ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+            blit_region.srcSubresource.aspectMask     = get_aspect_mask(source);
             blit_region.srcOffsets[0]                 = { 0, 0, 0 };
             blit_region.srcOffsets[1]                 = source_blit_size;
             blit_region.dstSubresource.mipLevel       = mip_index;
             blit_region.dstSubresource.baseArrayLayer = 0;
             blit_region.dstSubresource.layerCount     = 1;
-            blit_region.dstSubresource.aspectMask     = destination->IsDepthFormat() ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+            blit_region.dstSubresource.aspectMask     = get_aspect_mask(destination);
             blit_region.dstOffsets[0]                 = { 0, 0, 0 };
             blit_region.dstOffsets[1]                 = destination_blit_size;
         }
@@ -908,7 +1000,7 @@ namespace Spartan
         blit_region.srcSubresource.mipLevel       = 0;
         blit_region.srcSubresource.baseArrayLayer = 0;
         blit_region.srcSubresource.layerCount     = 1;
-        blit_region.srcSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit_region.srcSubresource.aspectMask     = get_aspect_mask(source);
         blit_region.srcOffsets[0]                 = { 0, 0, 0 };
         blit_region.srcOffsets[1]                 = source_blit_size;
         blit_region.dstSubresource.mipLevel       = 0;
@@ -922,7 +1014,7 @@ namespace Spartan
         RHI_Image_Layout source_layout_initial = source->GetLayout(0);
 
         // transition to blit appropriate layouts
-        source->SetLayout(RHI_Image_Layout::Transfer_Source,      this);
+        source->SetLayout(RHI_Image_Layout::Transfer_Source,           this);
         destination->SetLayout(RHI_Image_Layout::Transfer_Destination, this);
 
         // deduce filter
@@ -939,7 +1031,7 @@ namespace Spartan
             vulkan_filter[static_cast<uint32_t>(filter)]
         );
 
-        // Transition to the initial layouts
+        // transition to the initial layouts
         source->SetLayout(source_layout_initial, this);
         destination->SetLayout(RHI_Image_Layout::Present_Source, this);
     }
@@ -1086,12 +1178,11 @@ namespace Spartan
         if (m_cull_mode == cull_mode)
             return;
 
+        m_cull_mode = cull_mode;
         vkCmdSetCullMode(
             static_cast<VkCommandBuffer>(m_rhi_resource),
-            vulkan_cull_mode[static_cast<uint32_t>(cull_mode)]
+            vulkan_cull_mode[static_cast<uint32_t>(m_cull_mode)]
         );
-
-        m_cull_mode = cull_mode;
     }
 
     void RHI_CommandList::SetBufferVertex(const RHI_VertexBuffer* buffer, const uint32_t binding /*= 0*/)
@@ -1100,7 +1191,7 @@ namespace Spartan
         SP_ASSERT(buffer != nullptr);
         SP_ASSERT(buffer->GetRhiResource() != nullptr);
 
-        if (m_vertex_buffer_id == buffer->GetObjectId())
+        if (m_buffer_id_vertex == buffer->GetObjectId())
             return;
 
         VkBuffer vertex_buffers[] = { static_cast<VkBuffer>(buffer->GetRhiResource()) };
@@ -1114,7 +1205,7 @@ namespace Spartan
             offsets                                       // pOffsets
         );
 
-        m_vertex_buffer_id = buffer->GetObjectId();
+        m_buffer_id_vertex = buffer->GetObjectId();
         Profiler::m_rhi_bindings_buffer_vertex++;
     }
 
@@ -1124,7 +1215,7 @@ namespace Spartan
         SP_ASSERT(buffer != nullptr);
         SP_ASSERT(buffer->GetRhiResource() != nullptr);
 
-        if (m_index_buffer_id == buffer->GetObjectId())
+        if (m_buffer_id_index == buffer->GetObjectId())
             return;
 
         vkCmdBindIndexBuffer(
@@ -1134,8 +1225,50 @@ namespace Spartan
             buffer->Is16Bit() ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32 // indexType
         );
 
-        m_index_buffer_id = buffer->GetObjectId();
+        m_buffer_id_index = buffer->GetObjectId();
         Profiler::m_rhi_bindings_buffer_index++;
+    }
+
+    void RHI_CommandList::PushConstants(const uint32_t offset, const uint32_t size, const void* data)
+    {
+        SP_ASSERT(m_state == RHI_CommandListState::Recording);
+        SP_ASSERT(size <= RHI_Device::PropertyGetMaxPushConstantSize());
+
+        uint32_t stages = 0;
+
+        if (m_pso.shaders[RHI_Shader_Type::Compute])
+        {
+            stages |= VkShaderStageFlagBits::VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+
+        if (m_pso.shaders[RHI_Shader_Type::Vertex])
+        {
+            stages |= VkShaderStageFlagBits::VK_SHADER_STAGE_VERTEX_BIT;
+        }
+
+        if (m_pso.shaders[RHI_Shader_Type::Hull])
+        {
+            stages |= VkShaderStageFlagBits::VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+        }
+
+        if (m_pso.shaders[RHI_Shader_Type::Domain])
+        {
+            stages |= VkShaderStageFlagBits::VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+        }
+
+        if (m_pso.shaders[RHI_Shader_Type::Pixel])
+        {
+            stages |= VkShaderStageFlagBits::VK_SHADER_STAGE_FRAGMENT_BIT;
+        }
+
+        vkCmdPushConstants(
+            static_cast<VkCommandBuffer>(m_rhi_resource),
+            static_cast<VkPipelineLayout>(m_pipeline->GetResource_PipelineLayout()),
+            stages,
+            offset,
+            size,
+            data
+        );
     }
 
     void RHI_CommandList::SetConstantBuffer(const uint32_t slot, RHI_ConstantBuffer* constant_buffer) const
@@ -1148,38 +1281,11 @@ namespace Spartan
             return;
         }
 
-        // Set (will only happen if it's not already set)
+        // set (will only happen if it's not already set)
         m_descriptor_layout_current->SetConstantBuffer(slot, constant_buffer);
-    }
 
-    void RHI_CommandList::PushConstants(const uint32_t offset, const uint32_t size, const void* data)
-    {
-        SP_ASSERT(m_state == RHI_CommandListState::Recording);
-        SP_ASSERT(size <= RHI_Device::PropertyGetMaxPushConstantSize());
-
-        uint32_t stages = 0;
-        if (m_pso.IsCompute())
-        {
-            stages = VkShaderStageFlagBits::VK_SHADER_STAGE_COMPUTE_BIT;
-        }
-        else if (m_pso.IsGraphics())
-        {
-            stages = VkShaderStageFlagBits::VK_SHADER_STAGE_VERTEX_BIT;
-
-            if (m_pso.shader_pixel != nullptr)
-            {
-                stages |= VkShaderStageFlagBits::VK_SHADER_STAGE_FRAGMENT_BIT;
-            }
-        }
-
-        vkCmdPushConstants(
-            static_cast<VkCommandBuffer>(m_rhi_resource),
-            static_cast<VkPipelineLayout>(m_pipeline->GetResource_PipelineLayout()),
-            stages,
-            offset,
-            size,
-            data
-        );
+        // todo: detect if there are changes, otherwise don't bother binding
+        descriptor_sets::bind_dynamic = true;
     }
 
     void RHI_CommandList::SetSampler(const uint32_t slot, RHI_Sampler* sampler) const
@@ -1215,48 +1321,35 @@ namespace Spartan
         if (!texture || !texture->IsReadyForUse())
             return;
 
-        // Get some texture info
+        // get some texture info
         const uint32_t mip_count        = texture->GetMipCount();
         const bool mip_specified        = mip_index != rhi_all_mips;
         const uint32_t mip_start        = mip_specified ? mip_index : 0;
         RHI_Image_Layout current_layout = texture->GetLayout(mip_start);
 
-        SP_ASSERT_MSG(texture->GetRhiSrv() != nullptr, "The texture has no srv"); // Vulkan only has SRVs
         SP_ASSERT_MSG(current_layout != RHI_Image_Layout::Max && current_layout != RHI_Image_Layout::Preinitialized, "Invalid layout");
 
-        // Transition to appropriate layout (if needed)
+        // transition to appropriate layout (if needed)
         {
             RHI_Image_Layout target_layout = RHI_Image_Layout::Max;
-
             if (uav)
             {
                 SP_ASSERT(texture->IsUav());
                 
-                // According to section 13.1 of the Vulkan spec, storage textures have to be in a general layout.
+                // according to section 13.1 of the Vulkan spec, storage textures have to be in a general layout.
                 // https://www.khronos.org/registry/vulkan/specs/1.1-extensions/html/vkspec.html#descriptorsets-storageimage
                 target_layout = RHI_Image_Layout::General;
             }
             else
             {
                 SP_ASSERT(texture->IsSrv());
-
-                // Color
-                if (texture->IsColorFormat())
-                {
-                    target_layout = RHI_Image_Layout::Shader_Read;
-                }
-
-                // Depth
-                if (texture->IsDepthFormat())
-                {
-                    target_layout = RHI_Image_Layout::Depth_Stencil_Read;
-                }
+                target_layout = texture->IsColorFormat() ? RHI_Image_Layout::Shader_Read : RHI_Image_Layout::Shader_Read_Depth;
             }
 
-            // Verify that an appropriate layout has been deduced
+            // verify that an appropriate layout has been deduced
             SP_ASSERT(target_layout != RHI_Image_Layout::Max);
 
-            // Determine if a layout transition is needed
+            // determine if a layout transition is needed
             bool transition_required = current_layout != target_layout;
             {
                 bool rest_mips_have_same_layout = true;
@@ -1276,13 +1369,16 @@ namespace Spartan
             // transition
             if (transition_required)
             {
-                EndRenderPass(); // transitioning to a different layout must happen outside of a render pass
+                RenderPassEnd(); // transitioning to a different layout must happen outside of a render pass
                 texture->SetLayout(target_layout, this, mip_index, mip_range);
             }
         }
 
         // Set (will only happen if it's not already set)
         m_descriptor_layout_current->SetTexture(slot, texture, mip_index, mip_range);
+
+        // todo: detect if there are changes, otherwise don't bother binding
+        descriptor_sets::bind_dynamic = true;
     }
 
     void RHI_CommandList::SetStructuredBuffer(const uint32_t slot, RHI_StructuredBuffer* structured_buffer) const
@@ -1296,6 +1392,9 @@ namespace Spartan
         }
 
         m_descriptor_layout_current->SetStructuredBuffer(slot, structured_buffer);
+
+        // todo: detect if there are changes, otherwise don't bother binding
+        descriptor_sets::bind_dynamic = true;
     }
 
     void RHI_CommandList::BeginMarker(const char* name)
@@ -1319,7 +1418,13 @@ namespace Spartan
         SP_ASSERT(m_state == RHI_CommandListState::Recording);
 
         uint32_t timestamp_index = m_timestamp_index;
-        vkCmdWriteTimestamp(static_cast<VkCommandBuffer>(m_rhi_resource), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, static_cast<VkQueryPool>(m_rhi_query_pool), m_timestamp_index++);
+
+        vkCmdWriteTimestamp(
+            static_cast<VkCommandBuffer>(m_rhi_resource),
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            static_cast<VkQueryPool>(m_rhi_query_pool_timestamps),
+            m_timestamp_index++
+        );
 
         return timestamp_index;
     }
@@ -1328,28 +1433,80 @@ namespace Spartan
     {
         SP_ASSERT(m_state == RHI_CommandListState::Recording);
 
-        vkCmdWriteTimestamp(static_cast<VkCommandBuffer>(m_rhi_resource), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, static_cast<VkQueryPool>(m_rhi_query_pool), m_timestamp_index++);
+        vkCmdWriteTimestamp(
+            static_cast<VkCommandBuffer>(m_rhi_resource),
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            static_cast<VkQueryPool>(m_rhi_query_pool_timestamps),
+            m_timestamp_index++
+        );
     }
 
-    float RHI_CommandList::GetTimestampDuration(const uint32_t timestamp_index)
+    float RHI_CommandList::GetTimestampResult(const uint32_t index_timestamp)
     {
-        if (timestamp_index + 1 >= m_timestamps.size())
-        {
-            SP_LOG_ERROR("Pass index out of timestamp array range");
-            return 0.0f;
-        }
+        SP_ASSERT_MSG(index_timestamp + 1 < queries::timestamp::data.size(), "index out of range");
 
-        uint64_t start = m_timestamps[timestamp_index];
-        uint64_t end   = m_timestamps[timestamp_index + 1];
-
-        // If end has not been acquired yet (zero), early exit
-        if (end < start)
-            return 0.0f;
-
+        uint64_t start    = queries::timestamp::data[index_timestamp];
+        uint64_t end      = queries::timestamp::data[index_timestamp + 1];
         uint64_t duration = Math::Helper::Clamp<uint64_t>(end - start, 0, numeric_limits<uint64_t>::max());
         float duration_ms = static_cast<float>(duration * RHI_Device::PropertyGetTimestampPeriod() * 1e-6f);
 
-        return duration_ms;
+        return Math::Helper::Clamp<float>(duration_ms, 0.0f, numeric_limits<float>::max());
+    }
+
+    void RHI_CommandList::BeginOcclusionQuery(const uint64_t entity_id)
+    {
+        SP_ASSERT_MSG(m_pso.IsGraphics(), "Occlusion queries are only supported in graphics pipelines");
+
+        queries::occlusion::index_active = queries::occlusion::id_to_index[entity_id];
+        if (queries::occlusion::index_active == 0)
+        {
+            queries::occlusion::index_active           = ++queries::occlusion::index;
+            queries::occlusion::id_to_index[entity_id] = queries::occlusion::index;
+        }
+
+        if (!m_render_pass_active)
+        {
+            RenderPassBegin();
+        }
+
+        vkCmdBeginQuery(
+            static_cast<VkCommandBuffer>(m_rhi_resource),
+            static_cast<VkQueryPool>(m_rhi_query_pool_occlusion),
+            queries::occlusion::index_active,
+            0
+        );
+
+        queries::occlusion::occlusion_query_active = true;
+    }
+
+    void RHI_CommandList::EndOcclusionQuery()
+    {
+        if (!queries::occlusion::occlusion_query_active)
+            return;
+
+        vkCmdEndQuery(
+            static_cast<VkCommandBuffer>(m_rhi_resource),
+            static_cast<VkQueryPool>(m_rhi_query_pool_occlusion),
+            queries::occlusion::index_active
+        );
+
+        queries::occlusion::occlusion_query_active = false;
+    }
+
+    bool RHI_CommandList::GetOcclusionQueryResult(const uint64_t entity_id)
+    {
+        if (queries::occlusion::id_to_index.find(entity_id) == queries::occlusion::id_to_index.end())
+            return false;
+
+        uint32_t index  = queries::occlusion::id_to_index[entity_id];
+        uint64_t result = queries::occlusion::data[index]; // visible pixel count
+
+        return result == 0;
+    }
+
+    void RHI_CommandList::UpdateOcclusionQueries()
+    {
+        queries::occlusion::update(m_rhi_query_pool_occlusion, rhi_max_queries_occlusion);
     }
 
     void RHI_CommandList::BeginTimeblock(const char* name, const bool gpu_marker, const bool gpu_timing)
@@ -1403,35 +1560,17 @@ namespace Spartan
         m_timeblock_active = nullptr;
     }
 
-    void RHI_CommandList::OnPreDrawDispatch()
-    {
-        SP_ASSERT(m_state == RHI_CommandListState::Recording);
-        SP_ASSERT(m_pipeline != nullptr);
-
-        if (!m_render_pass_active && m_pso.IsGraphics())
-        {
-            BeginRenderPass();
-        }
-
-        Renderer::SetStandardResources(this);
-
-        // set dynamic resources
-        if (descriptor_sets::dynamic_descriptor_needs_to_bind)
-        {
-            descriptor_sets::set_dynamic(m_pso, m_rhi_resource, m_pipeline->GetResource_PipelineLayout(), m_descriptor_layout_current);
-            descriptor_sets::dynamic_descriptor_needs_to_bind = true;
-        }
-    }
-
-    void RHI_CommandList::InsertBarrier(void* image, const uint32_t aspect_mask,
+    void RHI_CommandList::InsertBarrierTexture(void* image, const uint32_t aspect_mask,
         const uint32_t mip_index, const uint32_t mip_range, const uint32_t array_length,
-        const RHI_Image_Layout layout_old, const RHI_Image_Layout layout_new
+        const RHI_Image_Layout layout_old, const RHI_Image_Layout layout_new, const bool is_depth
     )
     {
+        SP_ASSERT(m_state == RHI_CommandListState::Recording);
         SP_ASSERT(image != nullptr);
+        RenderPassEnd(); // you can't have a barrier inside a render pass
 
-        VkImageMemoryBarrier image_barrier            = {};
-        image_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        VkImageMemoryBarrier2 image_barrier           = {};
+        image_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2_KHR;
         image_barrier.pNext                           = nullptr;
         image_barrier.oldLayout                       = vulkan_image_layout[static_cast<VkImageLayout>(layout_old)];
         image_barrier.newLayout                       = vulkan_image_layout[static_cast<VkImageLayout>(layout_new)];
@@ -1443,103 +1582,42 @@ namespace Spartan
         image_barrier.subresourceRange.levelCount     = mip_range;
         image_barrier.subresourceRange.baseArrayLayer = 0;
         image_barrier.subresourceRange.layerCount     = array_length;
-        image_barrier.srcAccessMask                   = layout_to_access_mask(image_barrier.oldLayout, false);
-        image_barrier.dstAccessMask                   = layout_to_access_mask(image_barrier.newLayout, true);
+        image_barrier.srcAccessMask                   = layout_to_access_mask(image_barrier.oldLayout, false, is_depth); // operations that must complete before the barrier
+        image_barrier.srcStageMask                    = access_mask_to_pipeline_stage_mask(image_barrier.srcAccessMask); // stage at which the barrier applies, on the source side
+        image_barrier.dstAccessMask                   = layout_to_access_mask(image_barrier.newLayout, true, is_depth);  // operations that must wait for the barrier, on the new layout
+        image_barrier.dstStageMask                    = access_mask_to_pipeline_stage_mask(image_barrier.dstAccessMask); // stage at which the barrier applies, on the destination side
 
-        VkPipelineStageFlags source_stage_mask = 0;
-        {
-            if (image_barrier.oldLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
-            {
-                source_stage_mask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-            }
-            else if (image_barrier.oldLayout == VK_IMAGE_LAYOUT_UNDEFINED)
-            {
-                source_stage_mask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-            }
-            else
-            {
-                source_stage_mask = access_flags_to_pipeline_stage(image_barrier.srcAccessMask);
-            }
-        }
+        VkDependencyInfo dependency_info        = {};
+        dependency_info.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO_KHR;
+        dependency_info.imageMemoryBarrierCount = 1;
+        dependency_info.pImageMemoryBarriers    = &image_barrier;
 
-        VkPipelineStageFlags destination_stage_mask = 0;
-        {
-            if (image_barrier.newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
-            {
-                destination_stage_mask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-            }
-            else
-            {
-                destination_stage_mask = access_flags_to_pipeline_stage(image_barrier.dstAccessMask);
-            }
-        }
-
-        // as per vulkan, you can't transition within a render pass
-        if (m_render_pass_active)
-        {
-            EndRenderPass();
-        }
-
-        vkCmdPipelineBarrier
-        (
-            static_cast<VkCommandBuffer>(m_rhi_resource), // commandBuffer
-            source_stage_mask,                            // srcStageMask
-            destination_stage_mask,                       // dstStageMask
-            0,                                            // dependencyFlags
-            0,                                            // memoryBarrierCount
-            nullptr,                                      // pMemoryBarriers
-            0,                                            // bufferMemoryBarrierCount
-            nullptr,                                      // pBufferMemoryBarriers
-            1,                                            // imageMemoryBarrierCount
-            &image_barrier                                // pImageMemoryBarriers
-        );
-
+        vkCmdPipelineBarrier2(static_cast<VkCommandBuffer>(m_rhi_resource), &dependency_info);
         Profiler::m_rhi_pipeline_barriers++;
     }
 
-    void RHI_CommandList::InsertBarrier(RHI_Texture* texture, const uint32_t mip_start, const uint32_t mip_range, const uint32_t array_length, const RHI_Image_Layout layout_old, const RHI_Image_Layout layout_new)
+    void RHI_CommandList::InsertBarrierTexture(RHI_Texture* texture, const uint32_t mip_start, const uint32_t mip_range, const uint32_t array_length, const RHI_Image_Layout layout_old, const RHI_Image_Layout layout_new)
     {
         SP_ASSERT(texture != nullptr);
-        InsertBarrier(texture->GetRhiResource(), get_aspect_mask(texture), mip_start, mip_range, array_length, layout_old, layout_new);
+        InsertBarrierTexture(texture->GetRhiResource(), get_aspect_mask(texture), mip_start, mip_range, array_length, layout_old, layout_new, texture->IsDsv());
     }
 
-    void RHI_CommandList::InsertBarrierWaitForWrite(RHI_Texture* texture)
+    void RHI_CommandList::InsertBarrierTextureReadWrite(RHI_Texture* texture)
     {
         SP_ASSERT(texture != nullptr);
+        InsertBarrierTexture(texture->GetRhiResource(), get_aspect_mask(texture), 0, 1, 1, texture->GetLayout(0), texture->GetLayout(0), texture->IsDsv());
+    }
 
-        VkImageMemoryBarrier image_barrier            = {};
-        image_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        image_barrier.pNext                           = nullptr;
-        image_barrier.oldLayout                       = vulkan_image_layout[static_cast<VkImageLayout>(texture->GetLayout(0))];
-        image_barrier.newLayout                       = vulkan_image_layout[static_cast<VkImageLayout>(texture->GetLayout(0))];
-        image_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-        image_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-        image_barrier.image                           = static_cast<VkImage>(texture->GetRhiResource());
-        image_barrier.subresourceRange.aspectMask     = get_aspect_mask(texture);
-        image_barrier.subresourceRange.baseMipLevel   = 0;
-        image_barrier.subresourceRange.levelCount     = texture->GetMipCount();
-        image_barrier.subresourceRange.baseArrayLayer = 0;
-        image_barrier.subresourceRange.layerCount     = texture->GetArrayLength();
-        image_barrier.srcAccessMask                   = VK_ACCESS_SHADER_WRITE_BIT;
-        image_barrier.dstAccessMask                   = VK_ACCESS_SHADER_READ_BIT;
+    void RHI_CommandList::PreDraw()
+    {
+        if (!m_render_pass_active)
+        {
+            RenderPassBegin();
+        }
 
-        VkPipelineStageFlags source_stage_mask      = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-        VkPipelineStageFlags destination_stage_mask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-
-        vkCmdPipelineBarrier
-        (
-            static_cast<VkCommandBuffer>(m_rhi_resource),
-            source_stage_mask,
-            destination_stage_mask,
-            0,
-            0,
-            nullptr,
-            0,
-            nullptr,
-            1,
-            &image_barrier
-        );
-
-        Profiler::m_rhi_pipeline_barriers++;
+        if (descriptor_sets::bind_dynamic)
+        {
+            descriptor_sets::set_dynamic(m_pso, m_rhi_resource, m_pipeline->GetResource_PipelineLayout(), m_descriptor_layout_current);
+        }
     }
 }

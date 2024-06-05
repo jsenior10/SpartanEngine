@@ -35,7 +35,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "RHI/RHI_Texture2D.h"
 #include "RHI/RHI_SwapChain.h"
 #include "RHI/RHI_BlendState.h"
-#include "RHI/RHI_CommandPool.h"
+#include "RHI/RHI_Queue.h"
 #include "RHI/RHI_CommandList.h"
 #include "RHI/RHI_IndexBuffer.h"
 #include "RHI/RHI_VertexBuffer.h"
@@ -60,7 +60,6 @@ namespace ImGui::RHI
 
         struct ViewportRhiResources
         {
-            RHI_CommandPool* cmd_pool = nullptr;
             array<unique_ptr<RHI_IndexBuffer>, buffer_count> index_buffers;
             array<unique_ptr<RHI_VertexBuffer>, buffer_count> vertex_buffers;
             Pcb_Pass push_constant_buffer_pass;
@@ -69,9 +68,6 @@ namespace ImGui::RHI
             ViewportRhiResources() = default;
             ViewportRhiResources(const char* name, RHI_SwapChain* swapchain)
             {
-                // allocate command pool
-                cmd_pool = RHI_Device::CommandPoolAllocate(name, swapchain->GetObjectId(), RHI_Queue_Type::Graphics);
-
                 // allocate buffers
                 for (uint32_t i = 0; i < buffer_count; i++)
                 {
@@ -129,19 +125,9 @@ namespace ImGui::RHI
     {
         // create required RHI objects
         {
-            g_viewport_data = ViewportRhiResources("imgui", Renderer::GetSwapChain());
-
+            g_viewport_data       = ViewportRhiResources("imgui", Renderer::GetSwapChain());
             g_depth_stencil_state = make_shared<RHI_DepthStencilState>(false, false, RHI_Comparison_Function::Always);
-
-            g_rasterizer_state = make_shared<RHI_RasterizerState>
-            (
-                RHI_CullMode::None,
-                RHI_PolygonMode::Solid,
-                true,  // depth clip
-                true,  // scissor
-                false, // multi-sample
-                false  // anti-aliased lines
-            );
+            g_rasterizer_state    = make_shared<RHI_RasterizerState>(RHI_PolygonMode::Solid, true);
 
             g_blend_state = make_shared<RHI_BlendState>
             (
@@ -161,10 +147,10 @@ namespace ImGui::RHI
                 bool async = false;
 
                 g_shader_vertex = make_shared<RHI_Shader>();
-                g_shader_vertex->Compile(RHI_Shader_Vertex, shader_path, async, RHI_Vertex_Type::Pos2dUvCol8);
+                g_shader_vertex->Compile(RHI_Shader_Type::Vertex, shader_path, async, RHI_Vertex_Type::Pos2dUvCol8);
 
                 g_shader_pixel = make_shared<RHI_Shader>();
-                g_shader_pixel->Compile(RHI_Shader_Pixel, shader_path, async);
+                g_shader_pixel->Compile(RHI_Shader_Type::Pixel, shader_path, async);
             }
         }
 
@@ -210,20 +196,25 @@ namespace ImGui::RHI
 
     void render(ImDrawData* draw_data, WindowData* window_data = nullptr, const bool clear = true)
     {
-        // get the viewport resources
-        bool is_child_window                = window_data != nullptr;
-        ViewportRhiResources* rhi_resources = is_child_window ? window_data->viewport_rhi_resources.get() : &g_viewport_data;
+        // get resources
+        bool is_main_window                 = window_data == nullptr;
+        ViewportRhiResources* rhi_resources = is_main_window ? &g_viewport_data : window_data->viewport_rhi_resources.get();
+        RHI_SwapChain* swapchain            = is_main_window ? Renderer::GetSwapChain() : window_data->swapchain.get();
+        uint32_t buffer_index               = rhi_resources->buffer_index;
+        rhi_resources->buffer_index         = (rhi_resources->buffer_index + 1) % buffer_count;
+        RHI_VertexBuffer* vertex_buffer     = rhi_resources->vertex_buffers[buffer_index].get();
+        RHI_IndexBuffer* index_buffer       = rhi_resources->index_buffers[buffer_index].get();
+        RHI_Queue* queue                    = RHI_Device::GetQueue(RHI_Queue_Type::Graphics);
 
-        rhi_resources->cmd_pool->Tick();
+        // get command list
+        if (!is_main_window)
+        {
+            // for independent windows, we use another command list
+            // this is because it needs to begin, end and present independently
+            queue->NextCommandList();
+        }
 
-        // get buffer index
-        uint32_t buffer_index       = rhi_resources->buffer_index;
-        rhi_resources->buffer_index = (rhi_resources->buffer_index + 1) % buffer_count;
-
-        // get rhi resources for this command buffer
-        RHI_VertexBuffer* vertex_buffer = rhi_resources->vertex_buffers[buffer_index].get();
-        RHI_IndexBuffer* index_buffer   = rhi_resources->index_buffers[buffer_index].get();
-        RHI_CommandList* cmd_list       = rhi_resources->cmd_pool->GetCurrentCommandList();
+        RHI_CommandList* cmd_list = queue->GetCommandList();
 
         // update vertex and index buffers
         {
@@ -271,26 +262,29 @@ namespace ImGui::RHI
             }
         }
 
-        // define pipeline state
-        static RHI_PipelineState pso = {};
-        pso.name                     = "imgui";
-        pso.shader_vertex            = g_shader_vertex.get();
-        pso.shader_pixel             = g_shader_pixel.get();
-        pso.rasterizer_state         = g_rasterizer_state.get();
-        pso.blend_state              = g_blend_state.get();
-        pso.depth_stencil_state      = g_depth_stencil_state.get();
-        pso.render_target_swapchain  = is_child_window ? window_data->swapchain.get() : Renderer::GetSwapChain();
-        pso.clear_color[0]           = clear ? Color::standard_black : rhi_color_dont_care;
+        // set pipeline state
+        static RHI_PipelineState pso          = {};
+        pso.name                              = "imgui";
+        pso.shaders[RHI_Shader_Type::Vertex] = g_shader_vertex.get();
+        pso.shaders[RHI_Shader_Type::Pixel]  = g_shader_pixel.get();
+        pso.rasterizer_state                  = g_rasterizer_state.get();
+        pso.blend_state                       = g_blend_state.get();
+        pso.depth_stencil_state               = g_depth_stencil_state.get();
+        pso.render_target_swapchain           = swapchain;
+        pso.clear_color[0]                    = clear ? Color::standard_black : rhi_color_dont_care;
 
         // begin
-        const char* name = is_child_window ? "imgui_window_child" : "imgui_window_main";
-        bool gpu_timing  = !is_child_window; // profiler requires more work when windows enter the main window and their command pool is destroyed
-
-        cmd_list->Begin();
+        if (!is_main_window)
+        {
+            cmd_list->Begin(queue);
+        }
+        const char* name = is_main_window ? "imgui_window_main" : "imgui_window_child";
+        bool gpu_timing  = is_main_window; // profiler requires more work when windows enter the main window and their command pool is destroyed
         cmd_list->BeginTimeblock(name, true, Spartan::Profiler::IsGpuTimingEnabled() && gpu_timing);
+        cmd_list->SetPipelineState(pso);
         cmd_list->SetBufferVertex(vertex_buffer);
         cmd_list->SetBufferIndex(index_buffer);
-        cmd_list->SetPipelineState(pso);
+        cmd_list->SetCullMode(RHI_CullMode::None);
 
         // render
         {
@@ -334,11 +328,14 @@ namespace ImGui::RHI
                                 bool m_boost               = false;
                                 bool m_abs                 = false;
                                 bool m_point_sampling      = false;
-                                float mip_level            = 0;
+                                float mip_level            = 0.0f;
                                 bool is_texture_visualised = false;
+                                bool is_frame_texture      = false;
 
                                 if (RHI_Texture* texture = static_cast<RHI_Texture*>(pcmd->TextureId))
                                 {
+                                    is_frame_texture = Renderer::GetFrameTexture()->GetObjectId() == texture->GetObjectId();
+
                                     // during engine startup, some textures might be loading in different threads
                                     if (texture->IsReadyForUse())
                                     {
@@ -346,7 +343,8 @@ namespace ImGui::RHI
 
                                         // update texture viewer parameters
                                         is_texture_visualised = TextureViewer::GetVisualisedTextureId() == texture->GetObjectId();
-                                        mip_level = static_cast<float>(is_texture_visualised ? TextureViewer::GetMipLevel() : 0);
+                                        mip_level             = static_cast<float>(is_texture_visualised ? TextureViewer::GetMipLevel() : 0);
+                    
                                         if (is_texture_visualised)
                                         {
                                             m_channel_r      = TextureViewer::GetVisualisationFlags() & Visualise_Channel_R;
@@ -365,7 +363,7 @@ namespace ImGui::RHI
                                 rhi_resources->push_constant_buffer_pass.set_f4_value(m_channel_r, m_channel_g, m_channel_b, m_channel_a);
                                 rhi_resources->push_constant_buffer_pass.set_f3_value(m_gamma_correct, m_pack, m_boost);
                                 rhi_resources->push_constant_buffer_pass.set_f3_value2(m_abs, m_point_sampling, mip_level);
-                                rhi_resources->push_constant_buffer_pass.set_is_transparent(is_texture_visualised);
+                                rhi_resources->push_constant_buffer_pass.set_is_transparent_and_material_index(is_texture_visualised, is_frame_texture ? 1 : 0);
                             }
 
                             // compute transform matrix
@@ -396,23 +394,18 @@ namespace ImGui::RHI
             }
         }
 
-        // submit
         cmd_list->EndTimeblock();
-        cmd_list->End();
-        cmd_list->Submit();
 
-        if (!is_child_window)
+        if (!is_main_window)
         {
-            if (!Spartan::Window::IsMinimised())
-            {
-                Spartan::Renderer::Present();
-            }
+            cmd_list->Submit(queue, swapchain->GetObjectId());
         }
     }
 
     void window_create(ImGuiViewport* viewport)
     {
-        // platformHandle is SDL_Window, PlatformHandleRaw is HWND
+        // note: platformHandle is SDL_Window, PlatformHandleRaw is HWND
+
         SP_ASSERT_MSG(viewport->PlatformHandle != nullptr, "Platform handle is invalid");
 
         WindowData* window = new WindowData();
@@ -423,6 +416,7 @@ namespace ImGui::RHI
             static_cast<uint32_t>(viewport->Size.y),
             RHI_Present_Mode::Immediate,
             2,
+            Spartan::Display::GetHdr(),
             (string("swapchain_child_") + string(to_string(viewport->ID))).c_str()
         );
 
@@ -430,15 +424,13 @@ namespace ImGui::RHI
         viewport->RendererUserData     = window;
     }
 
-   void window_destroy(ImGuiViewport* viewport)
+    void window_destroy(ImGuiViewport* viewport)
     {
         if (WindowData* window = static_cast<WindowData*>(viewport->RendererUserData))
         {
-            RHI_Device::CommandPoolDestroy(window->viewport_rhi_resources->cmd_pool);
+            viewport->RendererUserData = nullptr;
             delete window;
         }
-
-        viewport->RendererUserData = nullptr;
     }
 
     void window_resize(ImGuiViewport* viewport, const ImVec2 size)
@@ -455,7 +447,6 @@ namespace ImGui::RHI
     void window_present(ImGuiViewport* viewport, void*)
     {
         WindowData* window = static_cast<WindowData*>(viewport->RendererUserData);
-        SP_ASSERT(window->viewport_rhi_resources->cmd_pool->GetCurrentCommandList()->GetState() == Spartan::RHI_CommandListState::Submitted);
         window->swapchain->Present();
     }
 

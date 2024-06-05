@@ -27,7 +27,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "RHI_Definitions.h"
 #include "RHI_PipelineState.h"
 #include "RHI_Descriptor.h"
-#include "../Core/SpObject.h"
 #include "../Rendering/Renderer_Definitions.h"
 //============================================
 
@@ -40,19 +39,17 @@ namespace Spartan
     {
         Idle,
         Recording,
-        Ended,
         Submitted
     };
 
-    class SP_CLASS RHI_CommandList : public SpObject
+    class SP_CLASS RHI_CommandList
     {
     public:
-        RHI_CommandList(const RHI_Queue_Type queue_type, const uint64_t swapchain_id, void* cmd_pool_resource, const char* name);
+        RHI_CommandList(void* cmd_pool, const char* name);
         ~RHI_CommandList();
 
-        void Begin();
-        void End();
-        void Submit();
+        void Begin(const RHI_Queue* queue);
+        void Submit(RHI_Queue* queue, const uint64_t swapchain_id);
         void WaitForExecution();
         void SetPipelineState(RHI_PipelineState& pso);
 
@@ -60,12 +57,9 @@ namespace Spartan
         void ClearPipelineStateRenderTargets(RHI_PipelineState& pipeline_state);
         void ClearRenderTarget(
             RHI_Texture* texture,
-            const uint32_t color_index         = 0,
-            const uint32_t depth_stencil_index = 0,
-            const bool storage                 = false,
-            const Color& clear_color           = rhi_color_load,
-            const float clear_depth            = rhi_depth_load,
-            const uint32_t clear_stencil       = rhi_stencil_load
+            const Color& clear_color     = rhi_color_load,
+            const float clear_depth      = rhi_depth_load,
+            const uint32_t clear_stencil = rhi_stencil_load
         );
 
         // draw
@@ -73,10 +67,11 @@ namespace Spartan
         void DrawIndexed(const uint32_t index_count, const uint32_t index_offset = 0, const uint32_t vertex_offset = 0, const uint32_t instance_start_index = 0, const uint32_t instance_count = 1);
 
         // dispatch
-        void Dispatch(uint32_t x, uint32_t y, uint32_t z = 1, bool async = false);
+        void Dispatch(uint32_t x, uint32_t y, uint32_t z = 1);
+        void Dispatch(RHI_Texture* texture);
 
         // blit
-        void Blit(RHI_Texture* source, RHI_Texture* destination, const bool blit_mips);
+        void Blit(RHI_Texture* source, RHI_Texture* destination, const bool blit_mips, const float source_scaling = 1.0f);
         void Blit(RHI_Texture* source, RHI_SwapChain* destination);
 
         // copy
@@ -104,6 +99,8 @@ namespace Spartan
 
         // push constant buffer
         void PushConstants(const uint32_t offset, const uint32_t size, const void* data);
+        template<typename T>
+        void PushConstants(const T& data) { PushConstants(0, sizeof(T), &data); }
 
         // sampler
         void SetSampler(const uint32_t slot, RHI_Sampler* sampler) const;
@@ -124,63 +121,62 @@ namespace Spartan
         void BeginMarker(const char* name);
         void EndMarker();
 
-        // timestamps
+        // timestamp queries
         uint32_t BeginTimestamp();
         void EndTimestamp();
-        float GetTimestampDuration(const uint32_t timestamp_index);
+        float GetTimestampResult(const uint32_t index_timestamp);
 
-        // timeblocks (Markers + Timestamps)
+        // occlusion queries
+        void BeginOcclusionQuery(const uint64_t entity_id);
+        void EndOcclusionQuery();
+        bool GetOcclusionQueryResult(const uint64_t entity_id);
+        void UpdateOcclusionQueries();
+
+        // timeblocks (markers + timestamps)
         void BeginTimeblock(const char* name, const bool gpu_marker = true, const bool gpu_timing = true);
         void EndTimeblock();
 
-        // state
-        const RHI_CommandListState GetState() const { return m_state; }
-        bool IsExecuting();
-
         // memory barriers
-        void InsertBarrier(void* image, const uint32_t aspect_mask, const uint32_t mip_index, const uint32_t mip_range, const uint32_t array_length, const RHI_Image_Layout layout_old, const RHI_Image_Layout layout_new);
-        void InsertBarrier(RHI_Texture* texture, const uint32_t mip_start, const uint32_t mip_range, const uint32_t array_length, const RHI_Image_Layout layout_old, const RHI_Image_Layout layout_new);
-        void InsertBarrierWaitForWrite(RHI_Texture* texture);
+        void InsertBarrierTexture(void* image, const uint32_t aspect_mask, const uint32_t mip_index, const uint32_t mip_range, const uint32_t array_length, const RHI_Image_Layout layout_old, const RHI_Image_Layout layout_new, const bool is_depth);
+        void InsertBarrierTexture(RHI_Texture* texture, const uint32_t mip_start, const uint32_t mip_range, const uint32_t array_length, const RHI_Image_Layout layout_old, const RHI_Image_Layout layout_new);
+        void InsertBarrierTextureReadWrite(RHI_Texture* texture);
 
         // misc
-        RHI_Semaphore* GetSemaphoreProccessed() { return m_proccessed_semaphore.get(); }
-        void* GetRhiResource() const { return m_rhi_resource; }
+        void SetIgnoreClearValues(const bool ignore_clear_values) { m_ignore_clear_values = ignore_clear_values; }
+        RHI_Semaphore* GetRenderingCompleteSemaphore()            { return m_rendering_complete_semaphore.get(); }
+        void* GetRhiResource() const                              { return m_rhi_resource; }
+        const RHI_CommandListState GetState() const               { return m_state; }
+        uint64_t GetSwapchainId() const                           { return m_swapchain_id; }
 
     private:
-        void OnPreDrawDispatch();
-        void BeginRenderPass();
-        void EndRenderPass();
+        void PreDraw();
+        void RenderPassBegin();
+        void RenderPassEnd();
 
         // sync
-        std::shared_ptr<RHI_Fence> m_proccessed_fence;
-        std::shared_ptr<RHI_Semaphore> m_proccessed_semaphore;
-
-        // profiling
-        const char* m_timeblock_active         = nullptr;
-        uint32_t m_timestamp_index             = 0;
-        static const uint32_t m_max_timestamps = 512;
-        std::array<uint64_t, m_max_timestamps> m_timestamps;
-
-        // variables to minimise state changes
-        uint64_t m_vertex_buffer_id = 0;
-        uint64_t m_index_buffer_id  = 0;
+        std::shared_ptr<RHI_Semaphore> m_rendering_complete_semaphore;
+        std::shared_ptr<RHI_Semaphore> m_rendering_complete_semaphore_timeline;
 
         // misc
+        uint64_t m_buffer_id_vertex                          = 0;
+        uint64_t m_buffer_id_index                           = 0;
+        bool m_ignore_clear_values                           = false;
+        uint64_t m_swapchain_id                              = 0;
+        uint32_t m_timestamp_index                           = 0;
         RHI_Pipeline* m_pipeline                             = nullptr;
         bool m_render_pass_active                            = false;
-        bool m_pipeline_dirty                                = false;
-        static const uint8_t m_resource_array_length_max     = 16;
         RHI_DescriptorSetLayout* m_descriptor_layout_current = nullptr;
         std::atomic<RHI_CommandListState> m_state            = RHI_CommandListState::Idle;
-        RHI_Queue_Type m_queue_type                          = RHI_Queue_Type::Max;
-        RHI_CullMode m_cull_mode                             = RHI_CullMode::Max;
+        RHI_CullMode m_cull_mode                             = RHI_CullMode::Back;
+        const char* m_timeblock_active                       = nullptr;
         static bool m_memory_query_support;
         std::mutex m_mutex_reset;
         RHI_PipelineState m_pso;
 
         // rhi resources
-        void* m_rhi_resource          = nullptr;
-        void* m_rhi_cmd_pool_resource = nullptr;
-        void* m_rhi_query_pool        = nullptr;
+        void* m_rhi_resource              = nullptr;
+        void* m_rhi_cmd_pool_resource     = nullptr;
+        void* m_rhi_query_pool_timestamps = nullptr;
+        void* m_rhi_query_pool_occlusion  = nullptr;
     };
 }

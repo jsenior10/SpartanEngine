@@ -25,15 +25,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../../Profiling/Profiler.h"
 #include "../RHI_Device.h"
 #include "../RHI_Implementation.h"
-#include "../RHI_Semaphore.h"
-#include "../RHI_CommandPool.h"
+#include "../RHI_Queue.h"
 #include "../RHI_DescriptorSet.h"
 #include "../RHI_Sampler.h"
-#include "../RHI_Fence.h"
 #include "../RHI_Shader.h"
 #include "../RHI_DescriptorSetLayout.h"
 #include "../RHI_Pipeline.h"
-#include "../RHI_Texture.h"
 SP_WARNINGS_OFF
 #define VMA_IMPLEMENTATION
 #include "vk_mem_alloc.h"
@@ -47,30 +44,191 @@ using namespace Spartan::Math;
 
 namespace Spartan
 {
+    namespace version
+    {
+        uint32_t used = 0;
+
+        string to_string()
+        {
+            return std::to_string(VK_VERSION_MAJOR(used)) + "." + std::to_string(VK_VERSION_MINOR(used)) + "." + std::to_string(VK_VERSION_PATCH(used));
+        }
+    }
+
     namespace
     {
         mutex mutex_allocation;
         mutex mutex_deletion_queue;
         unordered_map<RHI_Resource_Type, vector<void*>> deletion_queue;
 
-        bool is_present_instance_layer(const char* layer_name)
+        VkImageUsageFlags get_image_usage_flags(const RHI_Texture* texture)
         {
-            uint32_t layer_count;
-            vkEnumerateInstanceLayerProperties(&layer_count, nullptr);
+            VkImageUsageFlags flags = 0;
 
-            vector<VkLayerProperties> layers(layer_count);
-            vkEnumerateInstanceLayerProperties(&layer_count, layers.data());
+            flags |= texture->IsSrv() ? VK_IMAGE_USAGE_SAMPLED_BIT                  : 0;
+            flags |= texture->IsUav() ? VK_IMAGE_USAGE_STORAGE_BIT                  : 0;
+            flags |= texture->IsVrs() ? VK_IMAGE_USAGE_SHADING_RATE_IMAGE_BIT_NV    : 0;
+            flags |= texture->IsDsv() ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : 0;
+            flags |= texture->IsRtv() ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT         : 0;
 
-            for (const auto& layer : layers)
+            // If the texture has data, it will be staged, so it needs transfer bits
+            // If the texture participates in clear or blit operations, it needs transfer bits
+            if (texture->HasData() || (texture->GetFlags() & RHI_Texture_ClearBlit) != 0)
             {
-                if (strcmp(layer_name, layer.layerName) == 0)
-                    return true;
+                flags |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT; // source of a transfer command
+                flags |= VK_IMAGE_USAGE_TRANSFER_DST_BIT; // destination of a transfer command
             }
 
-            return false;
+            return flags;
         }
 
-        bool is_present_device_extension(const char* extension_name, VkPhysicalDevice device_physical)
+        VkImageTiling get_format_tiling(const RHI_Texture* texture)
+        {
+            VkFormatProperties2 format_properties2 = {};
+            format_properties2.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+
+            VkFormatProperties3 format_properties3 = {};
+            format_properties3.sType               = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3;
+            format_properties2.pNext               = &format_properties3;
+
+            VkFormatFeatureFlagBits2 format_flags  = 0;
+            format_flags                          |= texture->IsSrv() ? VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT : 0;
+            format_flags                          |= texture->IsUav() ? VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT : 0;
+            format_flags                          |= texture->IsRtv() ? VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT : 0;
+            format_flags                          |= texture->IsDsv() ? VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT : 0;
+            format_flags                          |= texture->IsVrs() ? VK_FORMAT_FEATURE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR : 0;
+
+            vkGetPhysicalDeviceFormatProperties2(RHI_Context::device_physical, vulkan_format[rhi_format_to_index(texture->GetFormat())], &format_properties2);
+
+            // check for optimal support
+            VkImageTiling tiling = VK_IMAGE_TILING_MAX_ENUM;
+            if (format_properties3.optimalTilingFeatures & format_flags)
+            {
+                tiling = VK_IMAGE_TILING_OPTIMAL;
+            }
+            // check for linear support
+            else if (format_properties3.linearTilingFeatures & format_flags)
+            {
+                tiling = VK_IMAGE_TILING_LINEAR;
+            }
+
+            SP_ASSERT_MSG(tiling != VK_IMAGE_TILING_MAX_ENUM, "The GPU doesn't support this format");
+            SP_ASSERT_MSG(tiling == VK_IMAGE_TILING_OPTIMAL, "This format doesn't support optimal tiling, switch to a more efficient format");
+
+            return tiling;
+        }
+
+        VkApplicationInfo create_application_info()
+        {
+            VkApplicationInfo app_info  = {};
+            app_info.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+            app_info.pApplicationName   = sp_info::name;             // for gpu vendors to do game specific driver optimizations
+            app_info.pEngineName        = app_info.pApplicationName; // for gpu vendors to do engine specific driver optimizations
+            app_info.engineVersion      = VK_MAKE_VERSION(sp_info::version_major, sp_info::version_minor, sp_info::version_revision);
+            app_info.applicationVersion = app_info.engineVersion;
+
+            // deduce api version to use based on the SDK and what the driver supports
+            {
+                uint32_t driver_version = 0;
+                {
+                    // per LunarG, if vkEnumerateInstanceVersion is not present, we are running on Vulkan 1.0
+                    // https://www.lunarg.com/wp-content/uploads/2019/02/Vulkan-1.1-Compatibility-Statement_01_19.pdf
+                    auto eiv = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(vkGetInstanceProcAddr(nullptr, "vkEnumerateInstanceVersion"));
+
+                    if (eiv)
+                    {
+                        eiv(&driver_version);
+                    }
+                    else
+                    {
+                        driver_version = VK_API_VERSION_1_0;
+                    }
+                }
+
+                // choose the version which is supported by both the sdk and the driver
+                uint32_t sdk_version = VK_HEADER_VERSION_COMPLETE;
+                app_info.apiVersion  = Helper::Min(sdk_version, driver_version);
+
+                // 1.3 the minimum required version as we are using extensions from 1.3
+                SP_ASSERT_MSG(app_info.apiVersion >= VK_API_VERSION_1_3, "Vulkan 1.3 is not supported");
+
+                // in case the SDK is not supported by the driver, prompt the user to update
+                if (sdk_version > driver_version)
+                {
+                    // detect and log version
+                    string driver_version_str = to_string(VK_API_VERSION_MAJOR(driver_version)) + "." + to_string(VK_API_VERSION_MINOR(driver_version)) + "." + to_string(VK_API_VERSION_PATCH(driver_version));
+                    string sdk_version_str    = to_string(VK_API_VERSION_MAJOR(sdk_version))    + "." + to_string(VK_API_VERSION_MINOR(sdk_version)) + "." + to_string(VK_API_VERSION_PATCH(sdk_version));
+                    SP_LOG_WARNING("Using Vulkan %s, update drivers or wait for GPU vendor to support Vulkan %s, engine may still work", driver_version_str.c_str(), sdk_version_str.c_str());
+                }
+
+                // save the api version we ended up using
+                version::used                = app_info.apiVersion;
+                RHI_Context::api_version_str = version::to_string();
+            }
+
+            return app_info;
+        }
+    }
+
+    namespace functions
+    {
+        PFN_vkCreateDebugUtilsMessengerEXT  create_messenger          = nullptr;
+        PFN_vkDestroyDebugUtilsMessengerEXT destroy_messenger         = nullptr;
+        PFN_vkSetDebugUtilsObjectTagEXT     set_object_tag            = nullptr;
+        PFN_vkSetDebugUtilsObjectNameEXT    set_object_name           = nullptr;
+        PFN_vkCmdBeginDebugUtilsLabelEXT    marker_begin              = nullptr;
+        PFN_vkCmdEndDebugUtilsLabelEXT      marker_end                = nullptr;
+        PFN_vkCmdSetFragmentShadingRateKHR  set_fragment_shading_rate = nullptr;
+
+        void get_pointers()
+        {
+            const bool validation_enabled  = Profiler::IsValidationLayerEnabled();
+            const bool gpu_markers_enabled = Profiler::IsGpuMarkingEnabled();
+
+            #define get_func(var, def)\
+            var = reinterpret_cast<PFN_##def>(vkGetInstanceProcAddr(static_cast<VkInstance>(RHI_Context::instance), #def));\
+            if (!var) SP_LOG_ERROR("Failed to get function pointer for %s", #def);\
+
+            /* VK_EXT_debug_utils */
+            {
+                if (validation_enabled)
+                {
+                    get_func(create_messenger, vkCreateDebugUtilsMessengerEXT);
+                    get_func(destroy_messenger, vkDestroyDebugUtilsMessengerEXT);
+
+                    SP_ASSERT(create_messenger && destroy_messenger);
+                }
+
+                if (gpu_markers_enabled)
+                {
+                    get_func(marker_begin, vkCmdBeginDebugUtilsLabelEXT);
+                    get_func(marker_end, vkCmdEndDebugUtilsLabelEXT);
+
+                    SP_ASSERT(marker_begin && marker_end);
+                }
+            }
+
+            /* VK_EXT_debug_marker */
+            if (validation_enabled)
+            {
+                get_func(set_object_tag, vkSetDebugUtilsObjectTagEXT);
+                get_func(set_object_name, vkSetDebugUtilsObjectNameEXT);
+
+                SP_ASSERT(set_object_tag && set_object_name);
+            }
+
+            get_func(set_fragment_shading_rate, vkCmdSetFragmentShadingRateKHR);
+            SP_ASSERT(set_fragment_shading_rate);
+        }
+    }
+
+    namespace extensions
+    {
+        // hardware capability viewer: https://vulkan.gpuinfo.org/
+
+        vector<const char*> extensions_instance = { "VK_KHR_surface",   "VK_KHR_win32_surface", "VK_EXT_swapchain_colorspace" };
+        vector<const char*> extensions_device   = { "VK_KHR_swapchain", "VK_EXT_memory_budget", "VK_KHR_fragment_shading_rate", "VK_EXT_hdr_metadata", "VK_EXT_robustness2" };
+
+        bool is_present_device(const char* extension_name, VkPhysicalDevice device_physical)
         {
             uint32_t extension_count = 0;
             vkEnumerateDeviceExtensionProperties(device_physical, nullptr, &extension_count, nullptr);
@@ -104,13 +262,12 @@ namespace Spartan
             return false;
         }
 
-        vector<const char*> get_physical_device_supported_extensions(const vector<const char*>& extensions, VkPhysicalDevice device_physical)
+        vector<const char*> get_extensions_device()
         {
             vector<const char*> extensions_supported;
-
-            for (const auto& extension : extensions)
+            for (const auto& extension : extensions_device)
             {
-                if (is_present_device_extension(extension, device_physical))
+                if (is_present_device(extension, RHI_Context::device_physical))
                 {
                     extensions_supported.emplace_back(extension);
                 }
@@ -120,14 +277,34 @@ namespace Spartan
                 }
             }
 
+            // check and add VK_KHR_portability_subset if present
+            // this extension is needed for portability across different platforms and
+            // must be enabled if the physical device supports it
+            //const char* portability_extension = "VK_KHR_portability_subset";
+            //if (is_present_device(portability_extension, RHI_Context::device_physical))
+            //{
+            //    extensions_supported.emplace_back(portability_extension);
+            //}
+
             return extensions_supported;
         }
 
-        vector<const char*> get_supported_extensions(const vector<const char*>& extensions)
+        vector<const char*> get_extensions_instance()
         {
-            vector<const char*> extensions_supported;
+            // validation layer messaging/logging
+            if (Profiler::IsValidationLayerEnabled())
+            {
+                extensions_instance.emplace_back("VK_EXT_debug_report");
+            }
 
-            for (const auto& extension : extensions)
+            // object naming (for the validation messages) and gpu markers
+            if (Profiler::IsGpuMarkingEnabled())
+            {
+                extensions_instance.emplace_back("VK_EXT_debug_utils");
+            }
+
+            vector<const char*> extensions_supported;
+            for (const auto& extension : extensions_instance)
             {
                 if (is_present_instance(extension))
                 {
@@ -141,48 +318,194 @@ namespace Spartan
 
             return extensions_supported;
         }
-
-        VkImageUsageFlags get_image_usage_flags(const RHI_Texture* texture)
-        {
-            VkImageUsageFlags flags = 0;
-
-            flags |= texture->IsSrv() ? VK_IMAGE_USAGE_SAMPLED_BIT : 0;
-            flags |= texture->IsUav() ? VK_IMAGE_USAGE_STORAGE_BIT : 0;
-            flags |= texture->IsRenderTargetDepthStencil() ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : 0;
-            flags |= texture->IsRenderTargetColor() ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0;
-
-            // If the texture has data, it will be staged, so it needs transfer bits.
-            // If the texture participates in clear or blit operations, it needs transfer bits.
-            if (texture->HasData() || (texture->GetFlags() & RHI_Texture_ClearBlit) != 0)
-            {
-                flags |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT; // source of a transfer command.
-                flags |= VK_IMAGE_USAGE_TRANSFER_DST_BIT; // destination of a transfer command
-            }
-
-            return flags;
-        }
     }
 
-    namespace command_pools
+    namespace validation_layer
     {
-        static vector<shared_ptr<RHI_CommandPool>> regular;
-        static array<shared_ptr<RHI_CommandPool>, 3> immediate;
-        static mutex mutex_immediate_execution;
-        static condition_variable condition_variable_immediate_execution;
-        static bool is_immediate_executing = false;
+        // layers configuration: https://vulkan.lunarg.com/doc/view/1.3.283.0/windows/layer_configuration.html
+        const char* name = "VK_LAYER_KHRONOS_validation";
+
+        const VkBool32 setting_validate_core          = VK_TRUE;                                                       // enable core validation checks
+        const VkBool32 setting_validate_sync          = VK_TRUE;                                                       // enable synchronization validation checks
+        const VkBool32 setting_thread_safety          = VK_TRUE;                                                       // enable thread safety checks
+        const char* setting_debug_action[]            = { "VK_DBG_LAYER_ACTION_LOG_MSG" };                             // specify action to log messages from validation layers
+        const char* setting_report_flags[]            = { "info", "warn", "perf", "error", "debug" };                  // specify types of messages to be reported by validation layers
+        const VkBool32 setting_enable_message_limit   = VK_TRUE;                                                       // enable limiting of duplicate validation messages
+        const int32_t setting_duplicate_message_limit = 1;                                                             // set the limit for duplicate validation messages
+        const char* setting_synchronization           = "VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT"; // enable synchronization validation 
+        const char* setting_best_practices            = "VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT";             // enable best practices
+        const char* setting_vendor_amd                = "VALIDATION_CHECK_ENABLE_VENDOR_SPECIFIC_AMD";                 // enable AMD-specific best practices
+        const char* setting_vendor_nvidia             = "VALIDATION_CHECK_ENABLE_VENDOR_SPECIFIC_NVIDIA";              // enable Nvidia-specific best practices
+
+        vector<VkLayerSettingEXT> get_settings()
+        {
+            SP_ASSERT(Profiler::IsValidationLayerEnabled());
+
+            // check layer availability
+            {
+                uint32_t layer_count;
+                vkEnumerateInstanceLayerProperties(&layer_count, nullptr);
+
+                vector<VkLayerProperties> layers(layer_count);
+                vkEnumerateInstanceLayerProperties(&layer_count, layers.data());
+
+                bool validation_layer_unavailable = true;
+                for (const VkLayerProperties& layer : layers)
+                {
+                    if (strcmp(name, layer.layerName) == 0)
+                    {
+                        validation_layer_unavailable = false;
+                        break;
+                    }
+                }
+
+                SP_ASSERT_MSG(!validation_layer_unavailable, "Please install the Vulkan SDK: https://vulkan.lunarg.com/sdk/home");
+            }
+
+            // create settings
+            vector<VkLayerSettingEXT> settings =
+            {
+                { name, "validate_core",           VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &setting_validate_core },           // enable core validation checks
+                { name, "validate_sync",           VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &setting_validate_sync },           // enable synchronization validation checks
+                { name, "thread_safety",           VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &setting_thread_safety },           // enable thread safety checks
+                { name, "debug_action",            VK_LAYER_SETTING_TYPE_STRING_EXT, 1, setting_debug_action },             // specify action to log messages
+                { name, "report_flags",            VK_LAYER_SETTING_TYPE_STRING_EXT, 5, setting_report_flags },             // specify types of messages to report
+                { name, "enable_message_limit",    VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &setting_enable_message_limit },    // enable limiting duplicate messages
+                { name, "duplicate_message_limit", VK_LAYER_SETTING_TYPE_INT32_EXT,  1, &setting_duplicate_message_limit }, // set limit for duplicate messages
+                { name, "enables",                 VK_LAYER_SETTING_TYPE_STRING_EXT, 1, &setting_synchronization },         // enable synchronization validation
+                { name, "enables",                 VK_LAYER_SETTING_TYPE_STRING_EXT, 1, &setting_best_practices },          // enable best practices
+                { name, "enables",                 VK_LAYER_SETTING_TYPE_STRING_EXT, 1, &setting_vendor_amd },              // enable AMD-specific best practices
+                { name, "enables",                 VK_LAYER_SETTING_TYPE_STRING_EXT, 1, &setting_vendor_nvidia }            // enable Nvidia-specific best practices
+            };
+
+            // enable GPU-assisted validation
+            if (Profiler::IsGpuAssistedValidationEnabled())
+            {
+                const char* setting_enable_gpu_assisted = "VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT";
+                settings.push_back({ name, "enables", VK_LAYER_SETTING_TYPE_STRING_EXT, 1, &setting_enable_gpu_assisted });
+            }
+
+            return settings;
+        }
+
+        namespace logging
+        {
+            VkDebugUtilsMessengerEXT messenger;
+
+            VKAPI_ATTR VkBool32 VKAPI_CALL callback
+            (
+                VkDebugUtilsMessageSeverityFlagBitsEXT msg_severity,
+                VkDebugUtilsMessageTypeFlagsEXT msg_type,
+                const VkDebugUtilsMessengerCallbackDataEXT* p_callback_data,
+                void* p_user_data
+            )
+            {
+                // ignore some messages
+                {
+                    // false positives and minor
+                    {
+
+                        // silence false positive synchronization error due to validation layer issue
+                        // check fix progress here: https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/7600
+                        if (p_callback_data->messageIdNumber == 0x29910a35)
+                            return VK_FALSE;
+
+                        // fidelityfx sdk issues related to best practices and deprecations
+                        if (p_callback_data->messageIdNumber == 0xfd92477a || p_callback_data->messageIdNumber == 0x990cbf9f || p_callback_data->messageIdNumber == 0xd8a870c)
+                            return VK_FALSE;
+
+                        // occlusion queries
+                        {
+                            if (p_callback_data->messageIdNumber == 0xd39be754)
+                            {
+                                // Validation Warning:
+                                // [BestPractices - QueryPool - Unavailable] Object 0 :
+                                // handle = 0x980b0000000002e, name = query_pool_occlusion, type = VK_OBJECT_TYPE_QUERY_POOL; | MessageID = 0xd39be754 | vkGetQueryPoolResults() :
+                                // QueryPool VkQueryPool 0x980b0000000002e[query_pool_occlusion] and query 0 : vkCmdBeginQuery() was never called.
+                                return VK_FALSE;
+                            }
+                        }
+                    }
+
+                    // legit but they spam every frame
+                    {
+                        // present related, they happen without the renderer doing anything, imgui presenting is enough
+                        if (p_callback_data->messageIdNumber == 0xe17ab4ae || p_callback_data->messageIdNumber == 0x42f2f4ed)
+                            return VK_FALSE;
+
+                        // depth gbuffer - some barrier might be dodgy
+                        if (p_callback_data->messageIdNumber == 0x5c0ec5d6 || p_callback_data->messageIdNumber == 0xe4d96472)
+                            return VK_FALSE;
+                    }
+                }
+
+                string msg = "Vulkan: " + string(p_callback_data->pMessage);
+
+                if (/*(msg_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) ||*/ (msg_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT))
+                {
+                    Log::Write(msg.c_str(), LogType::Info);
+                }
+                else if (msg_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
+                {
+                    Log::Write(msg.c_str(), LogType::Warning);
+                }
+                else if (msg_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+                {
+                    Log::Write(msg.c_str(), LogType::Error);
+                }
+
+                return VK_FALSE;
+            }
+
+            void enable()
+            {
+                if (functions::create_messenger)
+                {
+                    VkDebugUtilsMessengerCreateInfoEXT create_info = {};
+                    create_info.sType                              = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+                    create_info.messageSeverity                    = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+                    create_info.messageType                        = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+                    create_info.pfnUserCallback                    = callback;
+
+                    functions::create_messenger(RHI_Context::instance, &create_info, nullptr, &messenger);
+                }
+            }
+
+            void shutdown(VkInstance instance)
+            {
+                if (!functions::destroy_messenger)
+                    return;
+
+                functions::destroy_messenger(instance, messenger, nullptr);
+            }
+        }
     }
 
     namespace queues
     {
-        mutex mutex_queue;
         void* graphics = nullptr;
         void* compute  = nullptr;
         void* copy     = nullptr;
 
-        #define invalid_index numeric_limits<uint32_t>::max()
-        uint32_t index_graphics = invalid_index;
-        uint32_t index_compute  = invalid_index;
-        uint32_t index_copy     = invalid_index;
+        uint32_t index_graphics = numeric_limits<uint32_t>::max();
+        uint32_t index_compute  = numeric_limits<uint32_t>::max();
+        uint32_t index_copy     = numeric_limits<uint32_t>::max();
+
+        array<shared_ptr<RHI_Queue>, static_cast<uint32_t>(RHI_Queue_Type::Max)> regular;   // graphics, compute, and copy
+        array<shared_ptr<RHI_Queue>, static_cast<uint32_t>(RHI_Queue_Type::Max)> immediate; // graphics, compute, and copy
+
+        // sync for immediate execution
+        mutex mutex_queue;
+        mutex mutex_immediate_execution;
+        condition_variable condition_variable_immediate_execution;
+        bool is_immediate_executing = false;
+        RHI_Queue* queue            = nullptr;
+
+        void destroy()
+        {
+            regular.fill(nullptr);
+            immediate.fill(nullptr);
+        }
 
         uint32_t get_queue_family_index(const vector<VkQueueFamilyProperties>& queue_families, VkQueueFlags queue_flags)
         {
@@ -226,7 +549,7 @@ namespace Spartan
             }
 
             SP_ASSERT_MSG(false, "Could not find a matching queue family index");
-            return invalid_index;
+            return numeric_limits<uint32_t>::max();
         }
 
         void detect_queue_family_indices(VkPhysicalDevice device_physical)
@@ -241,108 +564,92 @@ namespace Spartan
             index_compute  = get_queue_family_index(queue_families, VK_QUEUE_COMPUTE_BIT);
             index_copy     = get_queue_family_index(queue_families, VK_QUEUE_TRANSFER_BIT);
         }
-    }
 
-    namespace functions
-    {
-        PFN_vkCreateDebugUtilsMessengerEXT  create_messenger;
-        PFN_vkDestroyDebugUtilsMessengerEXT destroy_messenger;
-        PFN_vkSetDebugUtilsObjectTagEXT     set_object_tag;
-        PFN_vkSetDebugUtilsObjectNameEXT    set_object_name;
-        PFN_vkCmdBeginDebugUtilsLabelEXT    marker_begin;
-        PFN_vkCmdEndDebugUtilsLabelEXT      marker_end;
-
-        void initialize(bool validation_enabled, bool gpu_markers_enabled)
+        bool get_queue_family_index(VkQueueFlagBits queue_flags, const vector<VkQueueFamilyProperties>& queue_family_properties, uint32_t* index)
         {
-            #define get_func(var, def)\
-            var = reinterpret_cast<PFN_##def>(vkGetInstanceProcAddr(static_cast<VkInstance>(RHI_Context::instance), #def));\
-            if (!var) SP_LOG_ERROR("Failed to get function pointer for %s", #def);\
-
-            /* VK_EXT_debug_utils */
+            // try to find a queue that only supports compute (dedicated)
+            if (queue_flags & VK_QUEUE_COMPUTE_BIT)
             {
-                if (validation_enabled)
+                for (uint32_t i = 0; i < static_cast<uint32_t>(queue_family_properties.size()); i++)
                 {
-                    get_func(create_messenger, vkCreateDebugUtilsMessengerEXT);
-                    get_func(destroy_messenger, vkDestroyDebugUtilsMessengerEXT);
-
-                    SP_ASSERT(create_messenger && destroy_messenger);
-                }
-        
-                if (gpu_markers_enabled)
-                {
-                    get_func(marker_begin, vkCmdBeginDebugUtilsLabelEXT);
-                    get_func(marker_end, vkCmdEndDebugUtilsLabelEXT);
-
-                    SP_ASSERT(marker_begin && marker_end);
+                    if ((queue_family_properties[i].queueFlags & queue_flags) && ((queue_family_properties[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0))
+                    {
+                        *index = i;
+                        return true;
+                    }
                 }
             }
+
+            // try to find a queue that only supports copy (dedicated)
+            if (queue_flags & VK_QUEUE_TRANSFER_BIT)
+            {
+                for (uint32_t i = 0; i < static_cast<uint32_t>(queue_family_properties.size()); i++)
+                {
+                    if ((queue_family_properties[i].queueFlags & queue_flags) && ((queue_family_properties[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0) && ((queue_family_properties[i].queueFlags & VK_QUEUE_COMPUTE_BIT) == 0))
+                    {
+                        *index = i;
+                        return true;
+                    }
+                }
+            }
+
+            // for graphics, just find any queue that supports graphics
+            for (uint32_t i = 0; i < static_cast<uint32_t>(queue_family_properties.size()); i++)
+            {
+                if (queue_family_properties[i].queueFlags & queue_flags)
+                {
+                    *index = i;
+                    return true;
+                }
+            }
+
+            return false;
+        };
+
+        bool get_queue_family_indices(const VkPhysicalDevice& physical_device)
+        {
+            uint32_t queue_family_count = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, nullptr);
         
-            /* VK_EXT_debug_marker */
-            if (validation_enabled)
+            vector<VkQueueFamilyProperties> queue_families_properties(queue_family_count);
+            vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, queue_families_properties.data());
+        
+            // graphics
+            uint32_t index = 0;
+            if (get_queue_family_index(VK_QUEUE_GRAPHICS_BIT, queue_families_properties, &index))
             {
-                get_func(set_object_tag, vkSetDebugUtilsObjectTagEXT);
-                get_func(set_object_name, vkSetDebugUtilsObjectNameEXT);
-
-                SP_ASSERT(set_object_tag && set_object_name);
+                queues::index_graphics = index;
             }
-        }
-    }
-
-    namespace validation_layer_logging
-    {
-        VkDebugUtilsMessengerEXT messenger;
-
-        VKAPI_ATTR VkBool32 VKAPI_CALL callback
-        (
-            VkDebugUtilsMessageSeverityFlagBitsEXT msg_severity,
-            VkDebugUtilsMessageTypeFlagsEXT msg_type,
-            const VkDebugUtilsMessengerCallbackDataEXT* p_callback_data,
-            void* p_user_data
-        )
-        {
-            // temporary, FidelityFX SDK has issues, don't want to be spamed until they are fixed
-            if (strstr(p_callback_data->pMessage, "fsr2") != nullptr)
-                return VK_FALSE;
-
-            string msg = "Vulkan: " + string(p_callback_data->pMessage);
-
-            if (/*(msg_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) ||*/ (msg_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT))
+            else
             {
-                Log::Write(msg.c_str(), LogType::Info);
+                SP_LOG_ERROR("Graphics queue not suported.");
+                return false;
             }
-            else if (msg_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
+        
+            // compute
+            if (get_queue_family_index(VK_QUEUE_COMPUTE_BIT, queue_families_properties, &index))
             {
-                Log::Write(msg.c_str(), LogType::Warning);
+                queues::index_compute = index;
             }
-            else if (msg_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+            else
             {
-                Log::Write(msg.c_str(), LogType::Error);
+                SP_LOG_ERROR("Compute queue not supported.");
+                return false;
             }
-
-            return VK_FALSE;
-        }
-
-        void initialize(VkInstance instance)
-        {
-            if (functions::create_messenger)
+        
+            // copy
+            if (get_queue_family_index(VK_QUEUE_TRANSFER_BIT, queue_families_properties, &index))
             {
-                VkDebugUtilsMessengerCreateInfoEXT create_info = {};
-                create_info.sType                              = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-                create_info.messageSeverity                    = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-                create_info.messageType                        = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
-                create_info.pfnUserCallback                    = callback;
-
-                functions::create_messenger(instance, &create_info, nullptr, &messenger);
+                queues::index_copy = index;
             }
-        }
-
-        void shutdown(VkInstance instance)
-        {
-            if (!functions::destroy_messenger)
-                return;
-
-            functions::destroy_messenger(instance, messenger, nullptr);
-        }
+            else
+            {
+                SP_LOG_ERROR("Copy queue not supported.");
+                return false;
+            }
+        
+            return true;
+        };
     }
 
     namespace vulkan_memory_allocator
@@ -351,7 +658,7 @@ namespace Spartan
         VmaAllocator allocator;
         unordered_map<uint64_t, VmaAllocation> allocations;
 
-        void initialize(const uint32_t api_version)
+        void initialize()
         {
             // https://gpuopen-librariesandsdks.github.io/VulkanMemoryAllocator/html/staying_within_budget.html
             // It is recommended to use VK_EXT_memory_budget device extension to obtain information about the budget from Vulkan device.
@@ -362,10 +669,28 @@ namespace Spartan
             allocator_info.physicalDevice         = RHI_Context::device_physical;
             allocator_info.device                 = RHI_Context::device;
             allocator_info.instance               = RHI_Context::instance;
-            allocator_info.vulkanApiVersion       = api_version;
+            allocator_info.vulkanApiVersion       = version::used;
             allocator_info.flags                  = VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
 
-            SP_ASSERT_MSG(vmaCreateAllocator(&allocator_info, &vulkan_memory_allocator::allocator) == VK_SUCCESS, "Failed to create memory allocator");
+            SP_ASSERT_VK_MSG(vmaCreateAllocator(&allocator_info, &vulkan_memory_allocator::allocator), "Failed to create memory allocator");
+
+            // register version
+            {
+                auto version_to_string = [](uint32_t version) -> std::string
+                {
+                     uint32_t major = version / 1000000;
+                     uint32_t minor = (version / 1000) % 1000;
+                     uint32_t patch = version % 1000;
+
+                     // for some reason the version in the code is different that the version
+                     // reported in the github releases, everything is reversed
+                     ostringstream oss;
+                     oss << minor << "." << patch << "." << major;
+                     return oss.str();
+                };
+
+                Settings::RegisterThirdPartyLib("Vulkan Memory Allocator", version_to_string(VMA_VULKAN_VERSION), "https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator");
+            }
         }
 
         void destroy()
@@ -427,8 +752,9 @@ namespace Spartan
 
     namespace descriptors
     {
+        mutex descriptor_pipeline_mutex;
         uint32_t allocated_descriptor_sets = 0;
-        VkDescriptorPool descriptor_pool = nullptr;
+        VkDescriptorPool descriptor_pool   = nullptr;
 
         // cache
         unordered_map<uint64_t, RHI_DescriptorSet> sets;
@@ -436,9 +762,32 @@ namespace Spartan
         unordered_map<uint64_t, shared_ptr<RHI_Pipeline>> pipelines;
         unordered_map<uint64_t, vector<RHI_Descriptor>> descriptor_cache;
 
+        void merge_descriptors(vector<RHI_Descriptor>& base_descriptors, const std::vector<RHI_Descriptor>& additional_descriptors)
+        {
+            for (const RHI_Descriptor& descriptor_additional : additional_descriptors)
+            {
+                bool updated_existing = false;
+                for (RHI_Descriptor& descriptor_base : base_descriptors)
+                {
+                    if (descriptor_base.slot == descriptor_additional.slot)
+                    {
+                        descriptor_base.stage |= descriptor_additional.stage;
+                        updated_existing = true;
+                        break;
+                    }
+                }
+
+                // if no updating took place, this is an additional shader only resource, add it
+                if (!updated_existing)
+                {
+                    base_descriptors.emplace_back(descriptor_additional);
+                }
+            }
+        }
+
         void get_descriptors_from_pipeline_state(RHI_PipelineState& pipeline_state, vector<RHI_Descriptor>& descriptors)
         {
-            SP_ASSERT(pipeline_state.IsValid());
+            pipeline_state.Prepare();
 
             // use the hash of the pipeline state as the key for the cache
             uint64_t pipeline_state_hash = pipeline_state.GetHash();
@@ -457,39 +806,30 @@ namespace Spartan
 
             if (pipeline_state.IsCompute())
             {
-                SP_ASSERT(pipeline_state.shader_compute->GetCompilationState() == RHI_ShaderCompilationState::Succeeded);
-                descriptors = pipeline_state.shader_compute->GetDescriptors();
+                SP_ASSERT(pipeline_state.shaders[RHI_Shader_Type::Compute]->GetCompilationState() == RHI_ShaderCompilationState::Succeeded);
+                descriptors = pipeline_state.shaders[RHI_Shader_Type::Compute]->GetDescriptors();
             }
             else if (pipeline_state.IsGraphics())
             {
-                SP_ASSERT(pipeline_state.shader_vertex->GetCompilationState() == RHI_ShaderCompilationState::Succeeded);
-                descriptors = pipeline_state.shader_vertex->GetDescriptors();
+                SP_ASSERT(pipeline_state.shaders[RHI_Shader_Type::Vertex]->GetCompilationState() == RHI_ShaderCompilationState::Succeeded);
+                descriptors = pipeline_state.shaders[RHI_Shader_Type::Vertex]->GetDescriptors();
 
-                // if there is a pixel shader, merge its resources into our map as well
-                if (pipeline_state.shader_pixel)
+                if (pipeline_state.shaders[RHI_Shader_Type::Pixel])
                 {
-                    SP_ASSERT(pipeline_state.shader_pixel->GetCompilationState() == RHI_ShaderCompilationState::Succeeded);
+                    SP_ASSERT(pipeline_state.shaders[RHI_Shader_Type::Pixel]->GetCompilationState() == RHI_ShaderCompilationState::Succeeded);
+                    merge_descriptors(descriptors, pipeline_state.shaders[RHI_Shader_Type::Pixel]->GetDescriptors());
+                }
 
-                    for (const RHI_Descriptor& descriptor_pixel : pipeline_state.shader_pixel->GetDescriptors())
-                    {
-                        // assume that the descriptor has been created in the vertex shader and only try to update its shader stage
-                        bool updated_existing = false;
-                        for (RHI_Descriptor& descriptor_vertex : descriptors)
-                        {
-                            if (descriptor_vertex.slot == descriptor_pixel.slot)
-                            {
-                                descriptor_vertex.stage |= descriptor_pixel.stage;
-                                updated_existing = true;
-                                break;
-                            }
-                        }
+                if (pipeline_state.shaders[RHI_Shader_Type::Hull])
+                {
+                    SP_ASSERT(pipeline_state.shaders[RHI_Shader_Type::Hull]->GetCompilationState() == RHI_ShaderCompilationState::Succeeded);
+                    merge_descriptors(descriptors, pipeline_state.shaders[RHI_Shader_Type::Hull]->GetDescriptors());
+                }
 
-                        // if no updating took place, this is a pixel shader only resource, add it
-                        if (!updated_existing)
-                        {
-                            descriptors.emplace_back(descriptor_pixel);
-                        }
-                    }
+                if (pipeline_state.shaders[RHI_Shader_Type::Domain])
+                {
+                    SP_ASSERT(pipeline_state.shaders[RHI_Shader_Type::Domain]->GetCompilationState() == RHI_ShaderCompilationState::Succeeded);
+                    merge_descriptors(descriptors, pipeline_state.shaders[RHI_Shader_Type::Domain]->GetDescriptors());
                 }
             }
 
@@ -550,7 +890,7 @@ namespace Spartan
                   layout_binding.binding                      = binding;
                   layout_binding.descriptorType               = resource_type == RHI_Device_Resource::textures_material ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLER;
                   layout_binding.descriptorCount              = rhi_max_array_size;
-                  layout_binding.stageFlags                   = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
+                  layout_binding.stageFlags                   = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
                   layout_binding.pImmutableSamplers           = nullptr;
 
                   VkDescriptorBindingFlags binding_flags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
@@ -568,7 +908,7 @@ namespace Spartan
                   layout_info.pNext                           = &layout_binding_flags;
 
                   VkDescriptorSetLayout* layout = &layouts[static_cast<uint32_t>(resource_type)];
-                  SP_VK_ASSERT_MSG(vkCreateDescriptorSetLayout(RHI_Context::device, &layout_info, nullptr, layout), "Failed to create descriptor set layout");
+                  SP_ASSERT_VK_MSG(vkCreateDescriptorSetLayout(RHI_Context::device, &layout_info, nullptr, layout), "Failed to create descriptor set layout");
                   RHI_Device::SetResourceName(static_cast<void*>(*layout), RHI_Resource_Type::DescriptorSetLayout, debug_name);
             }
 
@@ -590,7 +930,7 @@ namespace Spartan
 
                 // create
                 VkDescriptorSet* descriptor_set = &sets[static_cast<uint32_t>(resource_type)];
-                SP_VK_ASSERT_MSG(vkAllocateDescriptorSets(RHI_Context::device, &allocation_info, descriptor_set), "Failed to allocate descriptor set");
+                SP_ASSERT_VK_MSG(vkAllocateDescriptorSets(RHI_Context::device, &allocation_info, descriptor_set), "Failed to allocate descriptor set");
                 RHI_Device::SetResourceName(static_cast<void*>(*descriptor_set), RHI_Resource_Type::DescriptorSet, debug_name);
             }
 
@@ -693,260 +1033,209 @@ namespace Spartan
 
     namespace device_features
     {
-        VkPhysicalDeviceFeatures2 pNext                              = {};
-        VkPhysicalDeviceRobustness2FeaturesEXT robustness_features_2 = {};
-        VkPhysicalDeviceVulkan13Features device_features_1_3         = {};
-        VkPhysicalDeviceVulkan12Features device_features_1_2         = {};
-        uint32_t enabled_graphics_shader_stages;
+        uint32_t enabled_graphics_shader_stages                     = 0;
+        VkPhysicalDeviceFeatures2 features                          = {};
+        VkPhysicalDeviceRobustness2FeaturesEXT features_robustness  = {};
+        VkPhysicalDeviceVulkan13Features features_1_3               = {};
+        VkPhysicalDeviceVulkan12Features features_1_2               = {};
+        VkPhysicalDeviceFragmentShadingRateFeaturesKHR features_vrs = {};
 
-        void detect(VkPhysicalDevice device_physical)
+        void detect(bool* is_shading_rate_supported)
         {
-            // structs which hold which features are enabled
-            robustness_features_2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT;
-            device_features_1_3.sType   = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-            device_features_1_3.pNext   = &robustness_features_2;
-            device_features_1_2.sType   = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-            device_features_1_2.pNext   = &device_features_1_3;
-            pNext.sType                 = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-            pNext.pNext                 = &device_features_1_2;
+            // features that will be enabled
+            features_robustness.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT;
+            features_vrs.sType        = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR;
+            features_robustness.pNext = &features_vrs;
+            features_1_3.sType        = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+            features_1_3.pNext        = &features_robustness;
+            features_1_2.sType        = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+            features_1_2.pNext        = &features_1_3;
+            features.sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features.pNext            = &features_1_2;
 
-            // structs which hold which features are supported
-            VkPhysicalDeviceRobustness2FeaturesEXT robustness_2_support = {};
-            robustness_2_support.sType                                  = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT;
-            VkPhysicalDeviceVulkan13Features features_1_3_support       = {};
-            features_1_3_support.sType                                  = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-            features_1_3_support.pNext                                  = &robustness_2_support;
-            VkPhysicalDeviceVulkan12Features features_1_2_support       = {};
-            features_1_2_support.sType                                  = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-            features_1_2_support.pNext                                  = &features_1_3_support;
-            VkPhysicalDeviceFeatures2 features_support                  = {};
-            features_support.sType                                      = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-            features_support.pNext                                      = &features_1_2_support;
-            vkGetPhysicalDeviceFeatures2(device_physical, &features_support);
+            // features which are supported
+            VkPhysicalDeviceFragmentShadingRateFeaturesKHR support_vrs = {};
+            support_vrs.sType                                          = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR;
+            VkPhysicalDeviceRobustness2FeaturesEXT support_robustness  = {};
+            support_robustness.sType                                   = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT;
+            support_robustness.pNext                                   = &support_vrs;
+            VkPhysicalDeviceVulkan13Features support_1_3               = {};
+            support_1_3.sType                                          = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+            support_1_3.pNext                                          = &support_robustness;
+            VkPhysicalDeviceVulkan12Features support_1_2               = {};
+            support_1_2.sType                                          = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+            support_1_2.pNext                                          = &support_1_3;
+            VkPhysicalDeviceFeatures2 support                          = {};
+            support.sType                                              = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            support.pNext                                              = &support_1_2;
+            vkGetPhysicalDeviceFeatures2(RHI_Context::device_physical, &support);
 
             // check if certain features are supported and enable them
             {
-                // anisotropic filtering
-                SP_ASSERT(features_support.features.samplerAnisotropy == VK_TRUE);
-                pNext.features.samplerAnisotropy = VK_TRUE;
+                // variable shading rate
+                *is_shading_rate_supported = support_vrs.attachmentFragmentShadingRate == VK_TRUE;
+                if (*is_shading_rate_supported)
+                {
+                    // Enable this feature conditionally (no assert) as older GPUs like NV 1080 and Radeon RX Vega do not support it.
+                    // Support details: https://vulkan.gpuinfo.org/listdevicescoverage.php?platform=windows&extension=VK_KHR_fragment_shading_rate
+                    features_vrs.attachmentFragmentShadingRate = VK_TRUE;
+                }
 
-                // line and point rendering
-                SP_ASSERT(features_support.features.fillModeNonSolid == VK_TRUE);
-                pNext.features.fillModeNonSolid = VK_TRUE;
+                // misc
+                {
+                    // tessellation
+                    SP_ASSERT(support.features.tessellationShader == VK_TRUE);
+                    features.features.tessellationShader = VK_TRUE;
 
-                // lines with adjustable thickness
-                SP_ASSERT(features_support.features.wideLines == VK_TRUE);
-                pNext.features.wideLines = VK_TRUE;
+                    // depth clamp
+                    SP_ASSERT(support.features.depthClamp == VK_TRUE);
+                    features.features.depthClamp = VK_TRUE;
 
-                // cubemaps
-                SP_ASSERT(features_support.features.imageCubeArray == VK_TRUE);
-                pNext.features.imageCubeArray = VK_TRUE;
+                    // anisotropic filtering
+                    SP_ASSERT(support.features.samplerAnisotropy == VK_TRUE);
+                    features.features.samplerAnisotropy = VK_TRUE;
 
-                // timeline semaphores
-                SP_ASSERT(features_1_2_support.timelineSemaphore == VK_TRUE);
-                device_features_1_2.timelineSemaphore = VK_TRUE;
+                    // line and point rendering
+                    SP_ASSERT(support.features.fillModeNonSolid == VK_TRUE);
+                    features.features.fillModeNonSolid = VK_TRUE;
+
+                    // lines with adjustable thickness
+                    SP_ASSERT(support.features.wideLines == VK_TRUE);
+                    features.features.wideLines = VK_TRUE;
+
+                    // cubemaps
+                    SP_ASSERT(support.features.imageCubeArray == VK_TRUE);
+                    features.features.imageCubeArray = VK_TRUE;
+                }
+
+                // quality of life improvements
+                {
+                    // dynamic render passes and no frame buffer objects
+                    SP_ASSERT(support_1_3.dynamicRendering == VK_TRUE);
+                    features_1_3.dynamicRendering = VK_TRUE;
+
+                    // better synchronization
+                    SP_ASSERT(support_1_3.synchronization2 == VK_TRUE);
+                    features_1_3.synchronization2 = VK_TRUE;
+
+                    // timeline semaphores
+                    SP_ASSERT(support_1_2.timelineSemaphore == VK_TRUE);
+                    features_1_2.timelineSemaphore = VK_TRUE;
+
+                    // timeline semaphore counter
+                    SP_ASSERT(support.features.shaderFloat64 == VK_TRUE);
+                    features.features.shaderFloat64 = VK_TRUE;
+                }
 
                 // descriptors
                 {
-                    SP_ASSERT(features_1_2_support.descriptorBindingVariableDescriptorCount == VK_TRUE);
-                    device_features_1_2.descriptorBindingVariableDescriptorCount = VK_TRUE;
+                    SP_ASSERT(support_1_2.descriptorBindingVariableDescriptorCount == VK_TRUE);
+                    features_1_2.descriptorBindingVariableDescriptorCount = VK_TRUE;
 
-                    SP_ASSERT(features_1_2_support.descriptorBindingVariableDescriptorCount == VK_TRUE);
-                    device_features_1_2.descriptorBindingVariableDescriptorCount = VK_TRUE;
+                    SP_ASSERT(support_1_2.descriptorBindingVariableDescriptorCount == VK_TRUE);
+                    features_1_2.descriptorBindingVariableDescriptorCount = VK_TRUE;
 
-                    SP_ASSERT(features_1_2_support.descriptorBindingSampledImageUpdateAfterBind == VK_TRUE);
-                    device_features_1_2.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+                    SP_ASSERT(support_1_2.descriptorBindingSampledImageUpdateAfterBind == VK_TRUE);
+                    features_1_2.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
 
-                    SP_ASSERT(features_1_2_support.descriptorBindingPartiallyBound == VK_TRUE);
-                    device_features_1_2.descriptorBindingPartiallyBound = VK_TRUE;
+                    SP_ASSERT(support_1_2.descriptorBindingPartiallyBound == VK_TRUE);
+                    features_1_2.descriptorBindingPartiallyBound = VK_TRUE;
 
-                    SP_ASSERT(features_1_2_support.runtimeDescriptorArray == VK_TRUE);
-                    device_features_1_2.runtimeDescriptorArray = VK_TRUE;
+                    SP_ASSERT(support_1_2.runtimeDescriptorArray == VK_TRUE);
+                    features_1_2.runtimeDescriptorArray = VK_TRUE;
 
-                    SP_ASSERT(robustness_2_support.nullDescriptor == VK_TRUE);
-                    robustness_features_2.nullDescriptor = VK_TRUE;
+                    SP_ASSERT(support_robustness.nullDescriptor == VK_TRUE);
+                    features_robustness.nullDescriptor = VK_TRUE;
                 }
 
-                // dynamic states
-                {
-                    // rendering without render passes and frame buffer objects
-                    SP_ASSERT(features_1_3_support.dynamicRendering == VK_TRUE);
-                    device_features_1_3.dynamicRendering = VK_TRUE;
-                }
-
-                // FSR 2
+                // fsr 2
                 {
                     // extended types (int8, int16, int64, etc) - SPD
-                    SP_ASSERT(features_1_2_support.shaderSubgroupExtendedTypes == VK_TRUE);
-                    device_features_1_2.shaderSubgroupExtendedTypes = VK_TRUE;
+                    SP_ASSERT(support_1_2.shaderSubgroupExtendedTypes == VK_TRUE);
+                    features_1_2.shaderSubgroupExtendedTypes = VK_TRUE;
 
-                    // float16 - If supported, FSR 2 will opt for it, so don't assert.
-                    if (features_1_2_support.shaderFloat16 == VK_TRUE)
+                    // float16 - If supported, fsr will opt for it, so don't assert.
+                    if (support_1_2.shaderFloat16 == VK_TRUE)
                     {
-                        device_features_1_2.shaderFloat16 = VK_TRUE;
+                        features_1_2.shaderFloat16 = VK_TRUE;
                     }
 
-                    // int16 - If supported, FSR 2 will opt for it, so don't assert.
-                    if (features_support.features.shaderInt16 == VK_TRUE)
+                    // int16 - If supported, fsr will opt for it, so don't assert.
+                    if (support.features.shaderInt16 == VK_TRUE)
                     {
-                        pNext.features.shaderInt16 = VK_TRUE;
+                        features.features.shaderInt16 = VK_TRUE;
                     }
 
                     // wave64
-                    SP_ASSERT(features_1_3_support.shaderDemoteToHelperInvocation == VK_TRUE);
-                    device_features_1_3.shaderDemoteToHelperInvocation = VK_TRUE;
+                    SP_ASSERT(support_1_3.shaderDemoteToHelperInvocation == VK_TRUE);
+                    features_1_3.shaderDemoteToHelperInvocation = VK_TRUE;
 
-                    // wave64 - If supported, FSR 2 will opt for it, so don't assert.
-                    if (features_1_3_support.subgroupSizeControl == VK_TRUE)
+                    // wave64 - If supported, fsr will opt for it, so don't assert
+                    if (support_1_3.subgroupSizeControl == VK_TRUE)
                     {
-                        device_features_1_3.subgroupSizeControl = VK_TRUE;
+                        features_1_3.subgroupSizeControl = VK_TRUE;
                     }
                 }
 
-                // enable certain graphics shader stages
-                enabled_graphics_shader_stages = 0;
+                // directx shader compiler spir-v output automatically enables certain capabilities
                 {
-                    enabled_graphics_shader_stages = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-                    if (pNext.features.geometryShader)
-                    {
-                        enabled_graphics_shader_stages |= VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT;
-                    }
-                    if (pNext.features.tessellationShader)
-                    {
-                        enabled_graphics_shader_stages |= VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT | VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT;
-                    }
+                    // geometry
+                    SP_ASSERT(support.features.geometryShader == VK_TRUE);
+                    features.features.geometryShader = VK_TRUE;
+
+                    enabled_graphics_shader_stages |= VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT;
                 }
+
+                // enable shader stages
+                enabled_graphics_shader_stages |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+                enabled_graphics_shader_stages |= VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT;
+                enabled_graphics_shader_stages |= VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT;
+                enabled_graphics_shader_stages |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
             }
         }
     }
 
     void RHI_Device::Initialize()
     {
-        SP_ASSERT_MSG(RHI_Context::api_type == RHI_Api_Type::Vulkan, "RHI context not initialized");
-
-        // enable extensions
+        // instance
         {
-            if (Profiler::IsGpuAssistedValidationEnabled())
-            {
-                RHI_Context::validation_extensions.emplace_back(VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT);
-            }
+            VkInstanceCreateInfo info_instance      = {};
+            info_instance.sType                     = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+            VkApplicationInfo app_info              = create_application_info();
+            info_instance.pApplicationInfo          = &app_info;
 
+            // extensions
+            vector<const char*> extensions_instance = extensions::get_extensions_instance();
+            info_instance.enabledExtensionCount     = static_cast<uint32_t>(extensions_instance.size());
+            info_instance.ppEnabledExtensionNames   = extensions_instance.data();
+            info_instance.enabledLayerCount         = Profiler::IsValidationLayerEnabled() ? 1 : 0;
+            info_instance.ppEnabledLayerNames       = &validation_layer::name;
+
+            // settings
+            VkLayerSettingsCreateInfoEXT info_settings = {};
+            info_settings.sType                        = VK_STRUCTURE_TYPE_LAYER_SETTINGS_CREATE_INFO_EXT;
+            info_instance.pNext                        = &info_settings;
+            vector<VkLayerSettingEXT> settings;
             if (Profiler::IsValidationLayerEnabled())
-            {
-                RHI_Context::validation_extensions.emplace_back(VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT);
-                RHI_Context::validation_extensions.emplace_back(VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT);
-
-                // validation layer messaging/logging
-                RHI_Context::extensions_instance.emplace_back("VK_EXT_debug_report");
+            { 
+                settings = validation_layer::get_settings();
             }
+            info_settings.pSettings    = settings.data();
+            info_settings.settingCount = static_cast<uint32_t>(settings.size());
 
-            if (Profiler::IsValidationLayerEnabled() || Profiler::IsGpuMarkingEnabled())
-            {
-                // object naming (for the validation messages) and gpu markers
-                RHI_Context::extensions_instance.emplace_back("VK_EXT_debug_utils");
-            }
+            // create the Vulkan instance
+            SP_ASSERT_VK_MSG(vkCreateInstance(&info_instance, nullptr, &RHI_Context::instance), "Failed to create instance");
+
+            functions::get_pointers();
+            validation_layer::logging::enable();
         }
-
-        // create instance
-        VkApplicationInfo app_info = {};
-        {
-            app_info.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-            app_info.pApplicationName   = sp_info::name;
-            app_info.pEngineName        = app_info.pApplicationName;
-            app_info.engineVersion      = VK_MAKE_VERSION(sp_info::version_major, sp_info::version_minor, sp_info::version_revision);
-            app_info.applicationVersion = app_info.engineVersion;
-
-            // deduce API version to use
-            {
-                // get sdk version
-                uint32_t sdk_version = VK_HEADER_VERSION_COMPLETE;
-
-                // get driver version
-                uint32_t driver_version = 0;
-                {
-                    // Per LunarG, if vkEnumerateInstanceVersion is not present, we are running on Vulkan 1.0
-                    // https://www.lunarg.com/wp-content/uploads/2019/02/Vulkan-1.1-Compatibility-Statement_01_19.pdf
-                    auto eiv = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(vkGetInstanceProcAddr(nullptr, "vkEnumerateInstanceVersion"));
-
-                    if (eiv)
-                    {
-                        eiv(&driver_version);
-                    }
-                    else
-                    {
-                        driver_version = VK_API_VERSION_1_0;
-                    }
-                }
-
-                // choose the version which is supported by both the sdk and the driver
-                app_info.apiVersion = Helper::Min(sdk_version, driver_version);
-
-                // 1.3 the minimum required version as we are using extensions from 1.3
-                SP_ASSERT_MSG(app_info.apiVersion >= VK_API_VERSION_1_3, "Vulkan 1.3 is not supported");
-
-                // in case the SDK is not supported by the driver, prompt the user to update
-                if (sdk_version > driver_version)
-                {
-                    // detect and log version
-                    string driver_version_str = to_string(VK_API_VERSION_MAJOR(driver_version)) + "." + to_string(VK_API_VERSION_MINOR(driver_version)) + "." + to_string(VK_API_VERSION_PATCH(driver_version));
-                    string sdk_version_str    = to_string(VK_API_VERSION_MAJOR(sdk_version))    + "." + to_string(VK_API_VERSION_MINOR(sdk_version))    + "." + to_string(VK_API_VERSION_PATCH(sdk_version));
-                    SP_LOG_WARNING("Using Vulkan %s, update drivers or wait for GPU vendor to support Vulkan %s, engine may still work", driver_version_str.c_str(), sdk_version_str.c_str());
-                }
-
-                //  save API version
-                RHI_Context::api_version_str = to_string(VK_API_VERSION_MAJOR(app_info.apiVersion)) + "." + to_string(VK_API_VERSION_MINOR(app_info.apiVersion)) + "." + to_string(VK_API_VERSION_PATCH(app_info.apiVersion));
-            }
-
-            // get the supported extensions out of the requested extensions
-            vector<const char*> extensions_supported = get_supported_extensions(RHI_Context::extensions_instance);
-
-            VkInstanceCreateInfo create_info    = {};
-            create_info.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-            create_info.pApplicationInfo        = &app_info;
-            create_info.enabledExtensionCount   = static_cast<uint32_t>(extensions_supported.size());
-            create_info.ppEnabledExtensionNames = extensions_supported.data();
-            create_info.enabledLayerCount       = 0;
-
-            // validation features
-            VkValidationFeaturesEXT validation_features       = {};
-            validation_features.sType                         = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
-            validation_features.enabledValidationFeatureCount = static_cast<uint32_t>(RHI_Context::validation_extensions.size());
-            validation_features.pEnabledValidationFeatures    = RHI_Context::validation_extensions.data();
-
-            if (Profiler::IsValidationLayerEnabled())
-            {
-                // enable validation layer
-                if (is_present_instance_layer(RHI_Context::validation_layers.front()))
-                {
-                    // validation layers
-                    create_info.enabledLayerCount   = static_cast<uint32_t>(RHI_Context::validation_layers.size());
-                    create_info.ppEnabledLayerNames = RHI_Context::validation_layers.data();
-                    create_info.pNext               = &validation_features;
-                }
-                else
-                {
-                    SP_LOG_ERROR("Validation layer unavailable, install Vulkan SDK: https://vulkan.lunarg.com/sdk/home");
-                }
-            }
-
-            SP_ASSERT_MSG(vkCreateInstance(&create_info, nullptr, &RHI_Context::instance) == VK_SUCCESS, "Failed to create instance");
-        }
-
-        // get function pointers (from extensions)
-        functions::initialize(Profiler::IsValidationLayerEnabled(), Profiler::IsGpuMarkingEnabled());
-
-        // validation layer logging
-        if (Profiler::IsValidationLayerEnabled())
-        {
-            validation_layer_logging::initialize(RHI_Context::instance);
-        }
-
-        // find a physical device
-        SP_ASSERT_MSG(PhysicalDeviceDetect(), "Failed to detect any devices");
-        PhysicalDeviceSelectPrimary();
 
         // device
         {
+            // detect physical devices amd select the primary one
+            PhysicalDeviceDetect();
+            PhysicalDeviceSelectPrimary();
+
             // queue create info
             vector<VkDeviceQueueCreateInfo> queue_create_infos;
             {
@@ -973,9 +1262,12 @@ namespace Spartan
 
             // detect device properties
             {
+                VkPhysicalDeviceFragmentShadingRatePropertiesKHR shading_rate_properties = {};
+                shading_rate_properties.sType                                            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_PROPERTIES_KHR;
+
                 VkPhysicalDeviceVulkan13Properties device_properties_1_3 = {};
                 device_properties_1_3.sType                              = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES;
-                device_properties_1_3.pNext                              = nullptr;
+                device_properties_1_3.pNext                              = &shading_rate_properties;
 
                 VkPhysicalDeviceProperties2 properties_device = {};
                 properties_device.sType                       = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
@@ -984,15 +1276,18 @@ namespace Spartan
                 vkGetPhysicalDeviceProperties2(static_cast<VkPhysicalDevice>(RHI_Context::device_physical), &properties_device);
 
                 // save some properties
-                m_timestamp_period                    = properties_device.properties.limits.timestampPeriod;
-                m_min_uniform_buffer_offset_alignment = properties_device.properties.limits.minUniformBufferOffsetAlignment;
-                m_min_storage_buffer_offset_alignment = properties_device.properties.limits.minStorageBufferOffsetAlignment;
-                m_max_texture_1d_dimension            = properties_device.properties.limits.maxImageDimension1D;
-                m_max_texture_2d_dimension            = properties_device.properties.limits.maxImageDimension2D;
-                m_max_texture_3d_dimension            = properties_device.properties.limits.maxImageDimension3D;
-                m_max_texture_cube_dimension          = properties_device.properties.limits.maxImageDimensionCube;
-                m_max_texture_array_layers            = properties_device.properties.limits.maxImageArrayLayers;
-                m_max_push_constant_size              = properties_device.properties.limits.maxPushConstantsSize;
+                m_timestamp_period                     = properties_device.properties.limits.timestampPeriod;
+                m_min_uniform_buffer_offset_alignment  = properties_device.properties.limits.minUniformBufferOffsetAlignment;
+                m_min_storage_buffer_offset_alignment  = properties_device.properties.limits.minStorageBufferOffsetAlignment;
+                m_max_texture_1d_dimension             = properties_device.properties.limits.maxImageDimension1D;
+                m_max_texture_2d_dimension             = properties_device.properties.limits.maxImageDimension2D;
+                m_max_texture_3d_dimension             = properties_device.properties.limits.maxImageDimension3D;
+                m_max_texture_cube_dimension           = properties_device.properties.limits.maxImageDimensionCube;
+                m_max_texture_array_layers             = properties_device.properties.limits.maxImageArrayLayers;
+                m_max_push_constant_size               = properties_device.properties.limits.maxPushConstantsSize;
+                m_max_shading_rate_texel_size_x        = shading_rate_properties.maxFragmentShadingRateAttachmentTexelSize.width;
+                m_max_shading_rate_texel_size_y        = shading_rate_properties.maxFragmentShadingRateAttachmentTexelSize.height;
+                m_optimal_buffer_copy_offset_alignment = properties_device.properties.limits.optimalBufferCopyOffsetAlignment;
 
                 // disable profiler if timestamps are not supported
                 if (Profiler::IsGpuTimingEnabled())
@@ -1001,33 +1296,25 @@ namespace Spartan
                 }
             }
   
-            device_features::detect(RHI_Context::device_physical);
-
-            // get the supported extensions out of the requested extensions
-            vector<const char*> extensions_supported = get_physical_device_supported_extensions(RHI_Context::extensions_device, RHI_Context::device_physical);
-
-            // device create info
-            VkDeviceCreateInfo create_info = {};
-            {
-                create_info.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-                create_info.queueCreateInfoCount    = static_cast<uint32_t>(queue_create_infos.size());
-                create_info.pQueueCreateInfos       = queue_create_infos.data();
-                create_info.pNext                   = &device_features::pNext;
-                create_info.enabledExtensionCount   = static_cast<uint32_t>(extensions_supported.size());
-                create_info.ppEnabledExtensionNames = extensions_supported.data();
-
-                if (Profiler::IsValidationLayerEnabled())
-                {
-                    create_info.enabledLayerCount   = static_cast<uint32_t>(RHI_Context::validation_layers.size());
-                    create_info.ppEnabledLayerNames = RHI_Context::validation_layers.data();
-                }
-            }
+            device_features::detect(&m_is_shading_rate_supported);
 
             // create
-            SP_ASSERT_MSG(vkCreateDevice(RHI_Context::device_physical, &create_info, nullptr, &RHI_Context::device) == VK_SUCCESS, "Failed to create device");
+            {
+                VkDeviceCreateInfo create_info           = {};
+                create_info.sType                        = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+                create_info.queueCreateInfoCount         = static_cast<uint32_t>(queue_create_infos.size());
+                create_info.pQueueCreateInfos            = queue_create_infos.data();
+                create_info.pNext                        = &device_features::features;
+                vector<const char*> extensions_supported = extensions::get_extensions_device();
+                create_info.enabledExtensionCount        = static_cast<uint32_t>(extensions_supported.size());
+                create_info.ppEnabledExtensionNames      = extensions_supported.data();
+
+                SP_ASSERT_VK_MSG(vkCreateDevice(RHI_Context::device_physical, &create_info, nullptr, &RHI_Context::device), "Failed to create device");
+                SP_LOG_INFO("Vulkan %s", version::to_string().c_str());
+            }
         }
 
-        // get queues
+        // create queues
         {
             vkGetDeviceQueue(RHI_Context::device, queues::index_graphics, 0, reinterpret_cast<VkQueue*>(&queues::graphics));
             SetResourceName(queues::graphics, RHI_Resource_Type::Queue, "graphics");
@@ -1037,23 +1324,22 @@ namespace Spartan
 
             vkGetDeviceQueue(RHI_Context::device, queues::index_copy, 0, reinterpret_cast<VkQueue*>(&queues::copy));
             SetResourceName(queues::copy, RHI_Resource_Type::Queue, "copy");
+
+            queues::regular[static_cast<uint32_t>(RHI_Queue_Type::Graphics)] = make_shared<RHI_Queue>(RHI_Queue_Type::Graphics, "graphics");
+            queues::regular[static_cast<uint32_t>(RHI_Queue_Type::Compute)]  = make_shared<RHI_Queue>(RHI_Queue_Type::Compute,  "compute");
+            queues::regular[static_cast<uint32_t>(RHI_Queue_Type::Copy)]     = make_shared<RHI_Queue>(RHI_Queue_Type::Copy,     "copy");
+
+            queues::immediate[static_cast<uint32_t>(RHI_Queue_Type::Graphics)] = make_shared<RHI_Queue>(RHI_Queue_Type::Graphics, "graphics");
+            queues::immediate[static_cast<uint32_t>(RHI_Queue_Type::Compute)]  = make_shared<RHI_Queue>(RHI_Queue_Type::Compute,  "compute");
+            queues::immediate[static_cast<uint32_t>(RHI_Queue_Type::Copy)]     = make_shared<RHI_Queue>(RHI_Queue_Type::Copy,     "copy");
         }
 
-        vulkan_memory_allocator::initialize(app_info.apiVersion);
-
+        vulkan_memory_allocator::initialize();
         CreateDescriptorPool();
 
-        // detect and log version
-        {
-            string version_major = to_string(VK_VERSION_MAJOR(app_info.apiVersion));
-            string version_minor = to_string(VK_VERSION_MINOR(app_info.apiVersion));
-            string version_patch = to_string(VK_VERSION_PATCH(app_info.apiVersion));
-            string version       = version_major + "." + version_minor + "." + version_patch;
-
-            SP_LOG_INFO("Vulkan %s", version.c_str());
-
-            Settings::RegisterThirdPartyLib("Vulkan", version_major + "." + version_minor + "." + version_patch, "https://vulkan.lunarg.com/");
-        }
+        // register the vulkan sdk version, which can be higher than the version we are using which is driver dependent
+        string version_Sdlk = to_string(VK_VERSION_MAJOR(VK_HEADER_VERSION_COMPLETE)) + "." + to_string(VK_VERSION_MINOR(VK_HEADER_VERSION_COMPLETE)) + "." + to_string(VK_VERSION_PATCH(VK_HEADER_VERSION_COMPLETE));
+        Settings::RegisterThirdPartyLib("Vulkan", version_Sdlk, "https://vulkan.lunarg.com/");
     }
 
     void RHI_Device::Tick(const uint64_t frame_count)
@@ -1062,17 +1348,21 @@ namespace Spartan
         // Make sure to call vmaSetCurrentFrameIndex() every frame.
         // Budget is queried from Vulkan inside of it to avoid overhead of querying it with every allocation.
         vmaSetCurrentFrameIndex(vulkan_memory_allocator::allocator, static_cast<uint32_t>(frame_count));
+
+        // queues
+        for (uint32_t i = 0; i < static_cast<uint32_t>(queues::regular.size()); i++)
+        {
+            queues::regular[i]->NextCommandList();
+        }
     }
 
     void RHI_Device::Destroy()
     {
         SP_ASSERT(queues::graphics != nullptr);
 
+        // destroy queues
         QueueWaitAll();
-
-        // destroy command pools
-        command_pools::regular.clear();
-        command_pools::immediate.fill(nullptr);
+        queues::destroy();
 
         // descriptor pool
         vkDestroyDescriptorPool(RHI_Context::device, descriptors::descriptor_pool, nullptr);
@@ -1081,7 +1371,7 @@ namespace Spartan
         // debug messenger
         if (Profiler::IsValidationLayerEnabled())
         {
-            validation_layer_logging::shutdown(RHI_Context::instance);
+            validation_layer::logging::shutdown(RHI_Context::instance);
         }
 
         // descriptors
@@ -1101,13 +1391,13 @@ namespace Spartan
 
     // physical device
 
-    bool RHI_Device::PhysicalDeviceDetect()
+    void RHI_Device::PhysicalDeviceDetect()
     {
         uint32_t device_count = 0;
-        SP_ASSERT_MSG(
-            vkEnumeratePhysicalDevices(RHI_Context::instance, &device_count, nullptr) == VK_SUCCESS,
-            "Failed to get physical device count"
-        );
+        if (vkEnumeratePhysicalDevices(RHI_Context::instance, &device_count, nullptr) != VK_SUCCESS)
+        {
+            SP_ERROR_WINDOW("Ensure you're not using incorrect or experimental drivers. Update your graphics drivers and uninstall Vulkan 'Compatibility Packs'.");
+        }
 
         SP_ASSERT_MSG(device_count != 0, "There are no available physical devices");
         
@@ -1117,10 +1407,9 @@ namespace Spartan
             "Failed to enumerate physical devices"
         );
         
-        // Go through all the devices
+        // register all available physical devices
         for (const VkPhysicalDevice& device_physical : physical_devices)
         {
-            // Get device properties
             VkPhysicalDeviceProperties device_properties = {};
             vkGetPhysicalDeviceProperties(device_physical, &device_properties);
         
@@ -1133,7 +1422,6 @@ namespace Spartan
             if (device_properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU)    type = RHI_PhysicalDevice_Type::Virtual;
             if (device_properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU)            type = RHI_PhysicalDevice_Type::Cpu;
 
-            // Let the engine know about it as it will sort all of the devices from best to worst
             PhysicalDeviceRegister(PhysicalDevice
             (
                 device_properties.apiVersion,                                        // api version
@@ -1145,107 +1433,17 @@ namespace Spartan
                 static_cast<void*>(device_physical)                                  // data
             ));
         }
-
-        return true;
     }
 
     void RHI_Device::PhysicalDeviceSelectPrimary()
     {
-        auto get_queue_family_index = [](VkQueueFlagBits queue_flags, const vector<VkQueueFamilyProperties>& queue_family_properties, uint32_t* index)
-        {
-            // Dedicated queue for compute
-            // Try to find a queue family index that supports compute but not graphics
-            if (queue_flags & VK_QUEUE_COMPUTE_BIT)
-            {
-                for (uint32_t i = 0; i < static_cast<uint32_t>(queue_family_properties.size()); i++)
-                {
-                    if ((queue_family_properties[i].queueFlags & queue_flags) && ((queue_family_properties[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0))
-                    {
-                        *index = i;
-                        return true;
-                    }
-                }
-            }
-
-            // Dedicated queue for transfer
-            // Try to find a queue family index that supports transfer but not graphics and compute
-            if (queue_flags & VK_QUEUE_TRANSFER_BIT)
-            {
-                for (uint32_t i = 0; i < static_cast<uint32_t>(queue_family_properties.size()); i++)
-                {
-                    if ((queue_family_properties[i].queueFlags & queue_flags) && ((queue_family_properties[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0) && ((queue_family_properties[i].queueFlags & VK_QUEUE_COMPUTE_BIT) == 0))
-                    {
-                        *index = i;
-                        return true;
-                    }
-                }
-            }
-
-            // For other queue types or if no separate compute queue is present, return the first one to support the requested flags
-            for (uint32_t i = 0; i < static_cast<uint32_t>(queue_family_properties.size()); i++)
-            {
-                if (queue_family_properties[i].queueFlags & queue_flags)
-                {
-                    *index = i;
-                    return true;
-                }
-            }
-
-            return false;
-        };
-
-        auto get_queue_family_indices = [&get_queue_family_index](const VkPhysicalDevice& physical_device)
-        {
-            uint32_t queue_family_count = 0;
-            vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, nullptr);
-
-            vector<VkQueueFamilyProperties> queue_families_properties(queue_family_count);
-            vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, queue_families_properties.data());
-
-            // Graphics
-            uint32_t index = 0;
-            if (get_queue_family_index(VK_QUEUE_GRAPHICS_BIT, queue_families_properties, &index))
-            {
-                QueueSetIndex(RHI_Queue_Type::Graphics, index);
-            }
-            else
-            {
-                SP_LOG_ERROR("Graphics queue not suported.");
-                return false;
-            }
-
-            // Compute
-            if (get_queue_family_index(VK_QUEUE_COMPUTE_BIT, queue_families_properties, &index))
-            {
-                QueueSetIndex(RHI_Queue_Type::Compute, index);
-            }
-            else
-            {
-                SP_LOG_ERROR("Compute queue not supported.");
-                return false;
-            }
-
-            // Copy
-            if (get_queue_family_index(VK_QUEUE_TRANSFER_BIT, queue_families_properties, &index))
-            {
-                QueueSetIndex(RHI_Queue_Type::Copy, index);
-            }
-            else
-            {
-                SP_LOG_ERROR("Copy queue not supported.");
-                return false;
-            }
-
-            return true;
-        };
-
-        // Go through all the devices (sorted from best to worst based on their properties)
+        // go through all the devices (sorted from best to worst based on their properties)
         for (uint32_t device_index = 0; device_index < PhysicalDeviceGet().size(); device_index++)
         {
             VkPhysicalDevice device = static_cast<VkPhysicalDevice>(PhysicalDeviceGet()[device_index].GetData());
 
-            // Get the first device that has a graphics, a compute and a transfer queue
-            if (get_queue_family_indices(device))
+            // get the first device which supports graphics, compute and transfer queues
+            if (queues::get_queue_family_indices(device))
             {
                 PhysicalDeviceSetPrimary(device_index);
                 RHI_Context::device_physical = device;
@@ -1255,101 +1453,6 @@ namespace Spartan
     }
 
     // queues
-
-    void RHI_Device::QueuePresent(void* swapchain, uint32_t* image_index, vector<RHI_Semaphore*>& wait_semaphores)
-    {
-        lock_guard<mutex> lock(queues::mutex_queue);
-
-        array<VkSemaphore, 3> vk_wait_semaphores = { nullptr, nullptr, nullptr };
-
-        // Get semaphore Vulkan resource
-        uint32_t semaphore_count = static_cast<uint32_t>(wait_semaphores.size());
-        for (uint32_t i = 0; i < semaphore_count; i++)
-        {
-            SP_ASSERT_MSG(wait_semaphores[i]->GetStateCpu() == RHI_Sync_State::Submitted, "The wait semaphore hasn't been signaled");
-            vk_wait_semaphores[i] = static_cast<VkSemaphore>(wait_semaphores[i]->GetRhiResource());
-        }
-
-        VkPresentInfoKHR present_info   = {};
-        present_info.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-        present_info.waitSemaphoreCount = semaphore_count;
-        present_info.pWaitSemaphores    = vk_wait_semaphores.data();
-        present_info.swapchainCount     = 1;
-        present_info.pSwapchains        = reinterpret_cast<VkSwapchainKHR*>(&swapchain);
-        present_info.pImageIndices      = image_index;
-
-        SP_VK_ASSERT_MSG(vkQueuePresentKHR(static_cast<VkQueue>(queues::graphics), &present_info), "Failed to present");
-
-        // Update semaphore state
-        for (uint32_t i = 0; i < semaphore_count; i++)
-        {
-            wait_semaphores[i]->SetStateCpu(RHI_Sync_State::Idle);
-        }
-    }
-
-    void RHI_Device::QueueSubmit(const RHI_Queue_Type type, const uint32_t wait_flags, void* cmd_buffer, RHI_Semaphore* wait_semaphore /*= nullptr*/, RHI_Semaphore* signal_semaphore /*= nullptr*/, RHI_Fence* signal_fence /*= nullptr*/)
-    {
-        lock_guard<mutex> lock(queues::mutex_queue);
-
-        SP_ASSERT_MSG(cmd_buffer != nullptr, "Invalid command buffer");
-
-        // validate semaphores
-        if (wait_semaphore)   SP_ASSERT_MSG(wait_semaphore->GetStateCpu()   != RHI_Sync_State::Idle,      "Wait semaphore is in an idle state and will never be signaled");
-        if (signal_semaphore) SP_ASSERT_MSG(signal_semaphore->GetStateCpu() != RHI_Sync_State::Submitted, "Signal semaphore is already in a signaled state.");
-        if (signal_fence)     SP_ASSERT_MSG(signal_fence->GetStateCpu()     != RHI_Sync_State::Submitted, "Signal fence is already in a signaled state.");
-
-        // get semaphores
-        array<VkSemaphore, 1> vk_wait_semaphore   = { wait_semaphore   ? static_cast<VkSemaphore>(wait_semaphore->GetRhiResource())   : nullptr };
-        array<VkSemaphore, 1> vk_signal_semaphore = { signal_semaphore ? static_cast<VkSemaphore>(signal_semaphore->GetRhiResource()) : nullptr };
-
-        // submit info
-        VkSubmitInfo submit_info         = {};
-        submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit_info.pNext                = nullptr;
-        submit_info.waitSemaphoreCount   = wait_semaphore   != nullptr ? 1 : 0;
-        submit_info.pWaitSemaphores      = wait_semaphore   != nullptr ? vk_wait_semaphore.data() : nullptr;
-        submit_info.signalSemaphoreCount = signal_semaphore != nullptr ? 1 : 0;
-        submit_info.pSignalSemaphores    = signal_semaphore != nullptr ? vk_signal_semaphore.data() : nullptr;
-        submit_info.pWaitDstStageMask    = &wait_flags;
-        submit_info.commandBufferCount   = 1;
-        submit_info.pCommandBuffers      = reinterpret_cast<VkCommandBuffer*>(&cmd_buffer);
-
-        // get signal fence
-        void* vk_signal_fence = signal_fence ? signal_fence->GetRhiResource() : nullptr;
-
-        // the actual submit
-        SP_VK_ASSERT_MSG(vkQueueSubmit(static_cast<VkQueue>(QueueGet(type)), 1, &submit_info, static_cast<VkFence>(vk_signal_fence)), "Failed to submit");
-
-        // update semaphore states
-        if (wait_semaphore)   wait_semaphore->SetStateCpu(RHI_Sync_State::Idle);
-        if (signal_semaphore) signal_semaphore->SetStateCpu(RHI_Sync_State::Submitted);
-        if (signal_fence)     signal_fence->SetStateCpu(RHI_Sync_State::Submitted);
-    }
-
-    void RHI_Device::QueueWait(const RHI_Queue_Type type)
-    {
-        lock_guard<mutex> lock(queues::mutex_queue);
-
-        SP_VK_ASSERT_MSG(vkQueueWaitIdle(static_cast<VkQueue>(QueueGet(type))), "Failed to wait for queue");
-    }
-
-    void* RHI_Device::QueueGet(const RHI_Queue_Type type)
-    {
-        if (type == RHI_Queue_Type::Graphics)
-        {
-            return queues::graphics;
-        }
-        else if (type == RHI_Queue_Type::Copy)
-        {
-            return queues::copy;
-        }
-        else if (type == RHI_Queue_Type::Compute)
-        {
-            return queues::compute;
-        }
-
-        return nullptr;
-    }
 
     uint32_t RHI_Device::QueueGetIndex(const RHI_Queue_Type type)
     {
@@ -1369,19 +1472,36 @@ namespace Spartan
         return 0;
     }
 
-    void RHI_Device::QueueSetIndex(const RHI_Queue_Type type, const uint32_t index)
+    RHI_Queue* RHI_Device::GetQueue(const RHI_Queue_Type type)
     {
         if (type == RHI_Queue_Type::Graphics)
+            return queues::regular[static_cast<uint32_t>(RHI_Queue_Type::Graphics)].get();
+
+        if (type == RHI_Queue_Type::Compute)
+            return queues::regular[static_cast<uint32_t>(RHI_Queue_Type::Compute)].get();
+
+        return nullptr;
+    }
+
+    void* RHI_Device::GetQueueRhiResource(const RHI_Queue_Type type)
+    {
+        if (type == RHI_Queue_Type::Graphics)
+            return queues::graphics;
+
+        if (type == RHI_Queue_Type::Copy)
+            return queues::copy;
+
+        if (type == RHI_Queue_Type::Compute)
+            return queues::compute;
+
+        return nullptr;
+    }
+
+    void RHI_Device::QueueWaitAll()
+    {
+        for (uint32_t i = 0; i < 2; i++)
         {
-            queues::index_graphics = index;
-        }
-        else if (type == RHI_Queue_Type::Copy)
-        {
-            queues::index_copy = index;
-        }
-        else if (type == RHI_Queue_Type::Compute)
-        {
-            queues::index_compute = index;
+            queues::regular[i]->Wait();
         }
     }
 
@@ -1470,7 +1590,7 @@ namespace Spartan
 
         // create
         SP_ASSERT(descriptors::descriptor_pool == nullptr);
-        SP_VK_ASSERT_MSG(vkCreateDescriptorPool(RHI_Context::device, &pool_create_info, nullptr, &descriptors::descriptor_pool), "Failed to create descriptor pool");
+        SP_ASSERT_VK_MSG(vkCreateDescriptorPool(RHI_Context::device, &pool_create_info, nullptr, &descriptors::descriptor_pool), "Failed to create descriptor pool");
 
         Profiler::m_descriptor_set_count = 0;
     }
@@ -1527,7 +1647,7 @@ namespace Spartan
 
         // allocate
         SP_ASSERT(resource == nullptr);
-        SP_VK_ASSERT_MSG(vkAllocateDescriptorSets(RHI_Context::device, &allocate_info, reinterpret_cast<VkDescriptorSet*>(&resource)), "Failed to allocate descriptor set");
+        SP_ASSERT_VK_MSG(vkAllocateDescriptorSets(RHI_Context::device, &allocate_info, reinterpret_cast<VkDescriptorSet*>(&resource)), "Failed to allocate descriptor set");
 
         // track allocations
         descriptors::allocated_descriptor_sets++;
@@ -1630,9 +1750,9 @@ namespace Spartan
 
     void RHI_Device::GetOrCreatePipeline(RHI_PipelineState& pso, RHI_Pipeline*& pipeline, RHI_DescriptorSetLayout*& descriptor_set_layout)
     {
-        SP_ASSERT(pso.IsValid());
+        pso.Prepare();
 
-        pso.ComputeHash();
+        lock_guard<mutex> lock(descriptors::descriptor_pipeline_mutex);
 
         descriptor_set_layout = descriptors::get_or_create_descriptor_set_layout(pso).get();
 
@@ -1698,20 +1818,20 @@ namespace Spartan
         }
         else
         {
-            // Can it be mapped ? Buffers that use Map()/Unmap() need this, persistent buffers also need this.
+            // can it be mapped ? buffers that use Map()/Unmap() need this, persistent buffers also need this.
             allocation_create_info.flags |= is_mappable ? VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT : 0;
 
-            // Can it be mapped upon creation ? This is what a persistent buffer would use.
+            // can it be mapped upon creation ? this is what a persistent buffer would use
             allocation_create_info.flags |= (map_on_creation && !is_transfer_buffer) ? VMA_ALLOCATION_CREATE_MAPPED_BIT : 0;
 
-            // Cached on the CPU ? Our constant buffers are using dynamic offsets and do a lot of updates, so we need fast access.
-            allocation_create_info.flags |= (is_buffer_constant || is_buffer_storage) ? VK_MEMORY_PROPERTY_HOST_CACHED_BIT : 0;
+            // make everything immediately available on the GPU
+            allocation_create_info.flags |= (is_buffer_constant || is_buffer_storage) ? VK_MEMORY_PROPERTY_HOST_COHERENT_BIT : 0;
         }
 
-        // Create the buffer
+        // create the buffer
         VmaAllocation allocation = nullptr;
         VmaAllocationInfo allocation_info;
-        SP_VK_ASSERT_MSG(vmaCreateBuffer(
+        SP_ASSERT_VK_MSG(vmaCreateBuffer(
             vulkan_memory_allocator::allocator,
                 &buffer_create_info,
                 &allocation_create_info,
@@ -1720,7 +1840,7 @@ namespace Spartan
                 &allocation_info),
         "Failed to created buffer");
 
-        // If a pointer to the buffer data has been passed, map the buffer and copy over the data
+        // if a pointer to the buffer data has been passed, map the buffer and copy over the data
         if (data_initial != nullptr)
         {
             SP_ASSERT(is_mappable && "Mapping initial data requires the buffer to be created with a VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT memory flag.");
@@ -1731,9 +1851,9 @@ namespace Spartan
             // it. Map/unmap operations don't do that automatically.
 
             void* mapped_data = nullptr;
-            SP_VK_ASSERT_MSG(vmaMapMemory(vulkan_memory_allocator::allocator, allocation, &mapped_data), "Failed to map allocation");
+            SP_ASSERT_VK_MSG(vmaMapMemory(vulkan_memory_allocator::allocator, allocation, &mapped_data), "Failed to map allocation");
             memcpy(mapped_data, data_initial, size);
-            SP_VK_ASSERT_MSG(vmaFlushAllocation(vulkan_memory_allocator::allocator, allocation, 0, size), "Failed to flush allocation");
+            SP_ASSERT_VK_MSG(vmaFlushAllocation(vulkan_memory_allocator::allocator, allocation, 0, size), "Failed to flush allocation");
             vmaUnmapMemory(vulkan_memory_allocator::allocator, allocation);
         }
 
@@ -1766,10 +1886,27 @@ namespace Spartan
         create_info_image.mipLevels         = texture->GetMipCount();
         create_info_image.arrayLayers       = texture->GetArrayLength();
         create_info_image.format            = vulkan_format[rhi_format_to_index(texture->GetFormat())];
-        create_info_image.tiling            = VK_IMAGE_TILING_OPTIMAL;
+        create_info_image.tiling            = get_format_tiling(texture);
         create_info_image.initialLayout     = vulkan_image_layout[static_cast<uint8_t>(texture->GetLayout(0))];
         create_info_image.samples           = VK_SAMPLE_COUNT_1_BIT;
         create_info_image.sharingMode       = VK_SHARING_MODE_EXCLUSIVE;
+
+        // check physical device format support
+        {
+            VkPhysicalDeviceImageFormatInfo2 info = {};
+            info.sType                            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
+            info.format                           = create_info_image.format;
+            info.type                             = create_info_image.imageType;
+            info.tiling                           = create_info_image.tiling;
+            info.usage                            = create_info_image.usage;
+            info.flags                            = create_info_image.flags;
+
+            VkImageFormatProperties2 properties = {};
+            properties.sType                    = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
+
+            VkResult result = vkGetPhysicalDeviceImageFormatProperties2(RHI_Context::device_physical, &info, &properties);
+            SP_ASSERT_MSG(result != VK_ERROR_FORMAT_NOT_SUPPORTED, "The GPU doesn't support this image format with the specified properties");
+        }
 
         // describe allocation
         VmaAllocationCreateInfo create_info_allocation = {};
@@ -1783,7 +1920,7 @@ namespace Spartan
         VmaAllocationInfo allocation_info;
         VmaAllocation allocation;
         void*& resource = texture->GetRhiResource();
-        SP_VK_ASSERT_MSG(vmaCreateImage(
+        SP_ASSERT_VK_MSG(vmaCreateImage(
             vulkan_memory_allocator::allocator,
             &create_info_image,
             &create_info_allocation,
@@ -1819,7 +1956,7 @@ namespace Spartan
     {
         if (VmaAllocation allocation = static_cast<VmaAllocation>(vulkan_memory_allocator::get_allocation_from_resource(resource)))
         {
-            SP_VK_ASSERT_MSG(vmaMapMemory(vulkan_memory_allocator::allocator, allocation, reinterpret_cast<void**>(&mapped_data)), "Failed to map memory");
+            SP_ASSERT_VK_MSG(vmaMapMemory(vulkan_memory_allocator::allocator, allocation, reinterpret_cast<void**>(&mapped_data)), "Failed to map memory");
         }
     }
 
@@ -1887,62 +2024,27 @@ namespace Spartan
 
     RHI_CommandList* RHI_Device::CmdImmediateBegin(const RHI_Queue_Type queue_type)
     {
-        // Wait until it's safe to proceed
-        unique_lock<mutex> lock(command_pools::mutex_immediate_execution);
-        command_pools::condition_variable_immediate_execution.wait(lock, [] { return !command_pools::is_immediate_executing; });
-        command_pools::is_immediate_executing = true;
+        // wait until it's safe to proceed
+        unique_lock<mutex> lock(queues::mutex_immediate_execution);
+        queues::condition_variable_immediate_execution.wait(lock, [] { return !queues::is_immediate_executing; });
+        queues::is_immediate_executing = true;
 
-        // Create command pool for the given queue type, if needed.
-        uint32_t queue_index = static_cast<uint32_t>(queue_type);
-        if (!command_pools::immediate[queue_index])
-        {
-            command_pools::immediate[queue_index] = make_shared<RHI_CommandPool>("cmd_immediate_execution", 0, queue_type);
-        }
+        // get command pool
+        queues::queue = queues::immediate[static_cast<uint32_t>(queue_type)].get();
+        queues::queue->NextCommandList();
+        queues::queue->GetCommandList()->Begin(queues::queue);
 
-        //  Get command pool
-        RHI_CommandPool* cmd_pool = command_pools::immediate[queue_index].get();
-
-        cmd_pool->Tick();
-        cmd_pool->GetCurrentCommandList()->Begin();
-
-        return cmd_pool->GetCurrentCommandList();
+        return queues::queue->GetCommandList();
     }
 
     void RHI_Device::CmdImmediateSubmit(RHI_CommandList* cmd_list)
     {
-        cmd_list->End();
-        cmd_list->Submit();
+        cmd_list->Submit(queues::queue, 0);
         cmd_list->WaitForExecution();
 
-        // Signal that it's safe to proceed with the next ImmediateBegin()
-        command_pools::is_immediate_executing = false;
-        command_pools::condition_variable_immediate_execution.notify_one();
-    }
-
-    // command pools
-
-    RHI_CommandPool* RHI_Device::CommandPoolAllocate(const char* name, const uint64_t swap_chain_id, const RHI_Queue_Type queue_type)
-    {
-        return command_pools::regular.emplace_back(make_shared<RHI_CommandPool>(name, swap_chain_id, queue_type)).get();
-    }
-
-    void RHI_Device::CommandPoolDestroy(RHI_CommandPool* cmd_pool)
-    {
-        vector<shared_ptr<RHI_CommandPool>>::iterator it;
-        for (it = command_pools::regular.begin(); it != command_pools::regular.end();)
-        {
-            if (cmd_pool->GetObjectId() == (*it)->GetObjectId())
-            {
-                it = command_pools::regular.erase(it);
-                return;
-            }
-            it++;
-        }
-    }
-
-    const vector<shared_ptr<RHI_CommandPool>>& RHI_Device::GetCommandPools()
-    {
-        return command_pools::regular;
+        // signal that it's safe to proceed with the next ImmediateBegin()
+        queues::is_immediate_executing = false;
+        queues::condition_variable_immediate_execution.notify_one();
     }
 
     // markers
@@ -1989,5 +2091,33 @@ namespace Spartan
     uint32_t RHI_Device::GetEnabledGraphicsStages()
     {
         return device_features::enabled_graphics_shader_stages;
+    }
+
+    void RHI_Device::SetVariableRateShading(const RHI_CommandList* cmd_list, const bool enabled)
+    {
+        if (!m_is_shading_rate_supported)
+            return;
+
+        // set the fragment shading rate state for the current pipeline
+        VkExtent2D fragment_size = { 1, 1 };
+        VkFragmentShadingRateCombinerOpKHR combiner_operatins[2];
+
+        // The combiners determine how the different shading rate values for the pipeline, primitives and attachment are combined
+        if (enabled)
+        {
+            // If shading rate from attachment is enabled, we set the combiner, so that the values from the attachment are used
+            // Combiner for pipeline (A) and primitive (B) - Not used in this sample
+            combiner_operatins[0] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR;
+            // Combiner for pipeline (A) and attachment (B), replace the pipeline default value (fragment_size) with the fragment sizes stored in the attachment
+            combiner_operatins[1] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR;
+        }
+        else
+        {
+            // If shading rate from attachment is disabled, we keep the value set via the dynamic state
+            combiner_operatins[0] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR;
+            combiner_operatins[1] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR;
+        }
+
+        functions::set_fragment_shading_rate(static_cast<VkCommandBuffer>(cmd_list->GetRhiResource()), &fragment_size, combiner_operatins);
     }
 }

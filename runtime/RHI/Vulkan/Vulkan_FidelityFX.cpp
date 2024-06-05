@@ -119,7 +119,8 @@ namespace Spartan
             resource_description.depth                  = texture->GetArrayLength(); // depth or array length
             resource_description.format                 = to_ffx_surface_format(texture->GetFormat());
             resource_description.flags                  = FfxResourceFlags::FFX_RESOURCE_FLAGS_NONE;
-            resource_description.usage                  = texture->IsDepthFormat() ? FFX_RESOURCE_USAGE_DEPTHTARGET : FFX_RESOURCE_USAGE_READ_ONLY;
+            resource_description.usage                  = FFX_RESOURCE_USAGE_READ_ONLY;
+            resource_description.usage                  = static_cast<FfxResourceUsage>(resource_description.usage | (texture->IsDepthFormat() ? FFX_RESOURCE_USAGE_DEPTHTARGET : 0));
             resource_description.usage                  = static_cast<FfxResourceUsage>(resource_description.usage | (texture->IsUav() ? FFX_RESOURCE_USAGE_UAV : 0));
             resource_description.usage                  = static_cast<FfxResourceUsage>(resource_description.usage | usage_additional);
 
@@ -230,7 +231,7 @@ namespace Spartan
         *y = -2.0f * fsr2_dispatch_description.jitterOffset.y / resolution_render_y;
     }
 
-    void RHI_FidelityFX::FSR2_Resize(const Math::Vector2& resolution_render, const Math::Vector2& resolution_output)
+    void RHI_FidelityFX::FSR2_Resize(const Vector2& resolution_render, const Vector2& resolution_output)
     {
         // destroy context
         if (fsr2_context_created)
@@ -251,7 +252,7 @@ namespace Spartan
 
             // flags
             {
-                fsr2_context_description.flags      = FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE;
+                fsr2_context_description.flags      = FFX_FSR2_ENABLE_DEPTH_INVERTED | FFX_FSR2_ENABLE_HIGH_DYNAMIC_RANGE | FFX_FSR2_ENABLE_DYNAMIC_RESOLUTION;
                 #ifdef DEBUG
                 fsr2_context_description.flags     |= FFX_FSR2_ENABLE_DEBUG_CHECKING;
                 fsr2_context_description.fpMessage  = &ffx_message_callback;
@@ -276,9 +277,10 @@ namespace Spartan
         RHI_Texture* tex_velocity,
         RHI_Texture* tex_output,
         Camera* camera,
-        float delta_time_sec,
-        float sharpness,
-        float exposure
+        const float delta_time_sec,
+        const float sharpness,
+        const float exposure,
+        const float resolution_scale
     )
     {
         // transition to the appropriate layouts (will only happen if needed)
@@ -294,32 +296,32 @@ namespace Spartan
         {
             // resources
             {
-                fsr2_dispatch_description.color           = to_ffx_resource(tex_color,         L"fsr2_color");
-                fsr2_dispatch_description.colorOpaqueOnly = to_ffx_resource(tex_color_opaque,  L"fsr2_color_opaque");
-                fsr2_dispatch_description.depth           = to_ffx_resource(tex_depth,         L"fsr2_depth");
-                fsr2_dispatch_description.output          = to_ffx_resource(tex_output,        L"fsr2_output");
-                fsr2_dispatch_description.motionVectors   = to_ffx_resource(tex_velocity,      L"fsr2_velocity");
+                fsr2_dispatch_description.color           = to_ffx_resource(tex_color,        L"fsr2_color");
+                fsr2_dispatch_description.colorOpaqueOnly = to_ffx_resource(tex_color_opaque, L"fsr2_color_opaque");
+                fsr2_dispatch_description.depth           = to_ffx_resource(tex_depth,        L"fsr2_depth");
+                fsr2_dispatch_description.output          = to_ffx_resource(tex_output,       L"fsr2_output");
+                fsr2_dispatch_description.motionVectors   = to_ffx_resource(tex_velocity,     L"fsr2_velocity");
                 fsr2_dispatch_description.commandList     = ffxGetCommandListVK(static_cast<VkCommandBuffer>(cmd_list->GetRhiResource()));
             }
 
             // configuration
             fsr2_dispatch_description.motionVectorScale.x    = -static_cast<float>(tex_velocity->GetWidth());
             fsr2_dispatch_description.motionVectorScale.y    = -static_cast<float>(tex_velocity->GetHeight());
-            fsr2_dispatch_description.enableSharpening       = sharpness != 0.0f;             
-            fsr2_dispatch_description.sharpness              = sharpness;                     
-            fsr2_dispatch_description.frameTimeDelta         = delta_time_sec * 1000.0f;    // seconds to milliseconds
-            fsr2_dispatch_description.preExposure            = exposure;                    // the exposure value if not using FFX_FSR2_ENABLE_AUTO_EXPOSURE
-            fsr2_dispatch_description.renderSize.width       = tex_velocity->GetWidth();    // the resolution that was used for rendering the input resources
-            fsr2_dispatch_description.renderSize.height      = tex_velocity->GetHeight();   // the resolution that was used for rendering the input resources
-            fsr2_dispatch_description.cameraNear             = camera->GetFarPlane();       // far as near because we are using reverse-z
-            fsr2_dispatch_description.cameraFar              = camera->GetNearPlane();      // near as far because we are using reverse-z
-            fsr2_dispatch_description.cameraFovAngleVertical = camera->GetFovVerticalRad(); 
-            fsr2_dispatch_description.enableAutoReactive     = true;                        // generate reactive and transparency & composition masks
-            fsr2_dispatch_description.autoReactiveMax        = 0.9f;                        // a value to clamp the reactive mask
-            fsr2_dispatch_description.autoReactiveScale      = 1.0f;                        // a value to scale the reactive mask
-            fsr2_dispatch_description.autoTcThreshold        = 1.0f;                        // cutoff value for TC
-            fsr2_dispatch_description.autoTcScale            = 1.0f;                        // a value to scale the transparency and composition mask
-        }                                                                                   
+            fsr2_dispatch_description.enableSharpening       = sharpness != 0.0f;
+            fsr2_dispatch_description.sharpness              = sharpness;
+            fsr2_dispatch_description.frameTimeDelta         = delta_time_sec * 1000.0f;                                            // seconds to milliseconds
+            fsr2_dispatch_description.preExposure            = exposure;                                                            // the exposure value if not using FFX_FSR2_ENABLE_AUTO_EXPOSURE
+            fsr2_dispatch_description.renderSize.width       = static_cast<uint32_t>(tex_velocity->GetWidth() * resolution_scale);  // viewport size
+            fsr2_dispatch_description.renderSize.height      = static_cast<uint32_t>(tex_velocity->GetHeight() * resolution_scale); // viewport size
+            fsr2_dispatch_description.cameraNear             = camera->GetFarPlane();                                               // far as near because we are using reverse-z
+            fsr2_dispatch_description.cameraFar              = camera->GetNearPlane();                                              // near as far because we are using reverse-z
+            fsr2_dispatch_description.cameraFovAngleVertical = camera->GetFovVerticalRad();
+            fsr2_dispatch_description.enableAutoReactive     = true;                                                                // generate reactive and transparency & composition masks
+            fsr2_dispatch_description.autoReactiveMax        = 0.5f;                                                                // a value to clamp the reactive mask
+            fsr2_dispatch_description.autoReactiveScale      = 1.0f;                                                                // a value to scale the reactive mask
+            fsr2_dispatch_description.autoTcThreshold        = 0.5f;                                                                // a value to clamp the transparency and composition mask
+            fsr2_dispatch_description.autoTcScale            = 1.0f;                                                                // a value to scale the transparency and composition mask
+        }
 
         // dispatch
         SP_ASSERT(ffxFsr2ContextDispatch(&fsr2_context, &fsr2_dispatch_description) == FFX_OK);

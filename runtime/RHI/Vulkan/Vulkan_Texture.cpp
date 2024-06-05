@@ -25,7 +25,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../RHI_Device.h"
 #include "../RHI_Texture2D.h"
 #include "../RHI_CommandList.h"
-#include "../Profiling/Profiler.h"
 //================================
 
 //= NAMESPACES ===============
@@ -37,23 +36,6 @@ namespace Spartan
 {
     namespace
     {
-        VkImageTiling get_format_tiling(const RHI_Format format, VkFormatFeatureFlags feature_flags)
-        {
-            // Get format properties
-            VkFormatProperties format_properties;
-            vkGetPhysicalDeviceFormatProperties(RHI_Context::device_physical, vulkan_format[rhi_format_to_index(format)], &format_properties);
-
-            // check for optimal support
-            if (format_properties.optimalTilingFeatures & feature_flags)
-                return VK_IMAGE_TILING_OPTIMAL;
-
-            // check for linear support
-            if (format_properties.linearTilingFeatures & feature_flags)
-                return VK_IMAGE_TILING_LINEAR;
-
-            return VK_IMAGE_TILING_MAX_ENUM;
-        }
-
         VkImageAspectFlags get_aspect_mask(const RHI_Texture* texture, const bool only_depth = false, const bool only_stencil = false)
         {
             VkImageAspectFlags aspect_mask = 0;
@@ -76,25 +58,6 @@ namespace Spartan
             }
 
             return aspect_mask;
-        }
-
-        void create_image(RHI_Texture* texture)
-        {
-            // deduce format flags
-            bool is_render_target_depth_stencil = texture->IsRenderTargetDepthStencil();
-            VkFormatFeatureFlags format_flags  = is_render_target_depth_stencil ? VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
-
-            // deduce image tiling
-            RHI_Format format           = texture->GetFormat();
-            VkImageTiling image_tiling  = get_format_tiling(format, format_flags);
-            
-            SP_ASSERT_MSG(image_tiling != VK_IMAGE_TILING_MAX_ENUM, "The GPU doesn't support this format");
-            SP_ASSERT_MSG(image_tiling == VK_IMAGE_TILING_OPTIMAL,  "This format doesn't support optimal tiling, switch to a more efficient format");
-
-            // set layout to pre-initialised (required by Vulkan)
-            texture->SetLayout(RHI_Image_Layout::Preinitialized, nullptr);
-
-            RHI_Device::MemoryTextureCreate(texture);
         }
 
         void create_image_view(
@@ -156,12 +119,12 @@ namespace Spartan
                     name += name.empty() ? "sampled" : "-sampled";
                 }
 
-                if (texture->IsRenderTargetDepthStencil())
+                if (texture->IsDsv())
                 {
                     name += name.empty() ? "render_target_depth_stencil" : "-render_target_depth_stencil";
                 }
 
-                if (texture->IsRenderTargetColor())
+                if (texture->IsRtv())
                 {
                     name += name.empty() ? "render_target_color" : "-render_target_color";
                 }
@@ -183,35 +146,34 @@ namespace Spartan
             }
         }
 
-        bool copy_to_staging_buffer(RHI_Texture* texture, vector<VkBufferImageCopy>& regions, void*& staging_buffer)
+        void copy_to_staging_buffer(RHI_Texture* texture, vector<VkBufferImageCopy>& regions, void*& staging_buffer)
         {
-            if (!texture->HasData())
-            {
-                SP_LOG_WARNING("No data to stage");
-                return true;
-            }
+            SP_ASSERT_MSG(texture->HasData(), "No data to stage");
 
-            const uint32_t width           = texture->GetWidth();
-            const uint32_t height          = texture->GetHeight();
-            const uint32_t array_length    = texture->GetArrayLength();
-            const uint32_t mip_count       = texture->GetMipCount();
-            const uint32_t bytes_per_pixel = texture->GetBytesPerPixel();
+            const uint32_t width        = texture->GetWidth();
+            const uint32_t height       = texture->GetHeight();
+            const uint32_t array_length = texture->GetArrayLength();
+            const uint32_t mip_count    = texture->GetMipCount();
 
             const uint32_t region_count = array_length * mip_count;
             regions.resize(region_count);
             regions.reserve(region_count);
 
-            // fill out VkBufferImageCopy structs describing the array and the mip levels
-            VkDeviceSize buffer_offset = 0;
+            VkDeviceSize buffer_offset   = 0;
+            VkDeviceSize buffer_alignment = RHI_Device::PropertyGetOptimalBufferCopyOffsetAlignment();
+
             for (uint32_t array_index = 0; array_index < array_length; array_index++)
             {
                 for (uint32_t mip_index = 0; mip_index < mip_count; mip_index++)
                 {
-                    uint32_t region_index   = mip_index + array_index * mip_count;
-                    uint32_t mip_width      = width >> mip_index;
-                    uint32_t mip_height     = height >> mip_index;
+                    uint32_t region_index = mip_index + array_index * mip_count;
+                    uint32_t mip_width    = width >> mip_index;
+                    uint32_t mip_height   = height >> mip_index;
 
                     SP_ASSERT(mip_width != 0 && mip_height != 0);
+
+                    // align buffer offset
+                    buffer_offset = (buffer_offset + buffer_alignment - 1) & ~(buffer_alignment - 1);
 
                     regions[region_index].bufferOffset                    = buffer_offset;
                     regions[region_index].bufferRowLength                 = 0;
@@ -223,15 +185,13 @@ namespace Spartan
                     regions[region_index].imageOffset                     = { 0, 0, 0 };
                     regions[region_index].imageExtent                     = { mip_width, mip_height, 1 };
 
-                    // update staging buffer memory requirement (in bytes)
-                    buffer_offset += static_cast<uint64_t>(mip_width) * static_cast<uint64_t>(mip_height) * static_cast<uint64_t>(bytes_per_pixel);
+                    buffer_offset += RHI_Texture::CalculateMipSize(mip_width, mip_height, texture->GetFormat(), texture->GetBitsPerChannel(), texture->GetChannelCount());
                 }
             }
 
-            // create staging buffer
+            // create staging buffer with aligned size
             RHI_Device::MemoryBufferCreate(staging_buffer, buffer_offset, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, nullptr, "staging_buffer_texture");
 
-            // copy array and mip level data to the staging buffer
             void* mapped_data = nullptr;
             buffer_offset = 0;
             RHI_Device::MemoryMap(staging_buffer, mapped_data);
@@ -240,30 +200,27 @@ namespace Spartan
                 {
                     for (uint32_t mip_index = 0; mip_index < mip_count; mip_index++)
                     {
-                        uint64_t buffer_size = static_cast<uint64_t>(width >> mip_index) * static_cast<uint64_t>(height >> mip_index) * static_cast<uint64_t>(bytes_per_pixel);
+                        size_t size = RHI_Texture::CalculateMipSize(width >> mip_index, height >> mip_index, texture->GetFormat(), texture->GetBitsPerChannel(), texture->GetChannelCount());
 
                         if (texture->GetMip(array_index, mip_index).bytes.size() != 0)
                         {
-                            memcpy(static_cast<std::byte*>(mapped_data) + buffer_offset, texture->GetMip(array_index, mip_index).bytes.data(), buffer_size);
+                            memcpy(static_cast<std::byte*>(mapped_data) + buffer_offset, texture->GetMip(array_index, mip_index).bytes.data(), size);
                         }
 
-                        buffer_offset += buffer_size;
+                        buffer_offset += size;
                     }
                 }
 
                 RHI_Device::MemoryUnmap(staging_buffer);
             }
-
-            return true;
         }
 
-        bool stage(RHI_Texture* texture)
+        void stage(RHI_Texture* texture)
         {
             // copy the texture's data to a staging buffer
             void* staging_buffer = nullptr;
             vector<VkBufferImageCopy> regions;
-            if (!copy_to_staging_buffer(texture, regions, staging_buffer))
-                return false;
+            copy_to_staging_buffer(texture, regions, staging_buffer);
 
             // copy the staging buffer into the image
             if (RHI_CommandList* cmd_list = RHI_Device::CmdImmediateBegin(RHI_Queue_Type::Graphics))
@@ -272,7 +229,7 @@ namespace Spartan
                 RHI_Image_Layout layout = RHI_Image_Layout::Transfer_Destination;
 
                 // insert memory barrier
-                cmd_list->InsertBarrier(texture, 0, texture->GetMipCount(), texture->GetArrayLength(), texture->GetLayout(0), layout);
+                cmd_list->InsertBarrierTexture(texture, 0, texture->GetMipCount(), texture->GetArrayLength(), texture->GetLayout(0), layout);
 
                 // copy the staging buffer to the image
                 vkCmdCopyBufferToImage(
@@ -293,21 +250,15 @@ namespace Spartan
                 // update texture layout
                 texture->SetLayout(layout, nullptr);
             }
-
-            return true;
         }
 
         RHI_Image_Layout GetAppropriateLayout(RHI_Texture* texture)
         {
             RHI_Image_Layout target_layout = RHI_Image_Layout::Preinitialized;
 
-            if (texture->IsRenderTargetColor())
+            if (texture->IsRt())
             {
-                target_layout = RHI_Image_Layout::Color_Attachment;
-            }
-            else if (texture->IsRenderTargetDepthStencil())
-            {
-                target_layout = RHI_Image_Layout::Depth_Stencil_Attachment;
+                target_layout = RHI_Image_Layout::Attachment;
             }
 
             if (texture->IsUav())
@@ -320,22 +271,25 @@ namespace Spartan
         }
     }
 
-    void RHI_Texture::RHI_SetLayout(const RHI_Image_Layout new_layout, RHI_CommandList* cmd_list, const uint32_t mip_start, const uint32_t mip_range)
-    {
-        cmd_list->InsertBarrier(this, mip_start, mip_range, m_array_length, m_layout[mip_start], new_layout);
-    }
-
     bool RHI_Texture::RHI_CreateResource()
     {
         SP_ASSERT_MSG(m_width  != 0, "Width can't be zero");
         SP_ASSERT_MSG(m_height != 0, "Height can't be zero");
 
-        create_image(this);
+        // as per vulkan
+        SetLayout(RHI_Image_Layout::Preinitialized, nullptr);
+
+        // create image
+        RHI_Device::MemoryTextureCreate(this);
 
         // if the texture has any data, stage it
         if (HasData())
         {
-            SP_ASSERT_MSG(stage(this), "Failed to stage");
+            stage(this);
+            if ((m_flags & RHI_Texture_KeepData) == 0)
+            { 
+                m_slices.clear();
+            }
         }
 
         // transition to target layout
@@ -344,7 +298,7 @@ namespace Spartan
             RHI_Image_Layout target_layout = GetAppropriateLayout(this);
 
             // transition to the final layout
-            cmd_list->InsertBarrier(this, 0, m_mip_count, m_array_length, m_layout[0], target_layout);
+            cmd_list->InsertBarrierTexture(this, 0, m_mip_count, m_array_length, m_layout[0], target_layout);
         
             // flush
             RHI_Device::CmdImmediateSubmit(cmd_list);
@@ -380,12 +334,12 @@ namespace Spartan
                 // both cube map slices/faces and array length is encoded into m_array_length.
                 // they are rendered on individually, hence why the resource type is ResourceType::Texture2d
 
-                if (IsRenderTargetColor())
+                if (IsRtv())
                 {
                     create_image_view(m_rhi_resource, m_rhi_rtv[i], this, ResourceType::Texture2d, i, 1, 0, 1, false, false);
                 }
 
-                if (IsRenderTargetDepthStencil())
+                if (IsDsv())
                 {
                     create_image_view(m_rhi_resource, m_rhi_dsv[i], this, ResourceType::Texture2d, i, 1, 0, 1, true, false);
                 }
@@ -400,7 +354,7 @@ namespace Spartan
 
     void RHI_Texture::RHI_DestroyResource(const bool destroy_main, const bool destroy_per_view)
     {
-        // De-allocate everything
+        // de-allocate everything
         if (destroy_main)
         {
             RHI_Device::DeletionQueueAdd(RHI_Resource_Type::TextureView, m_rhi_srv);

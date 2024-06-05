@@ -28,7 +28,7 @@ static const float g_ssr_depth_threshold = 8.0f;
 uint compute_step_count(float roughness)
 {
     float steps_min = 8.0;    // for very rough surfaces
-    float steps_max = 512.0f; // for very reflective surfaces
+    float steps_max = 128.0f; // for very reflective surfaces
 
     return (uint)lerp(steps_max, steps_min, roughness);
 }
@@ -140,16 +140,18 @@ float2 trace_ray(uint2 screen_pos, float3 ray_start_vs, float3 ray_dir_vs, float
 }
 
 [numthreads(THREAD_GROUP_COUNT_X, THREAD_GROUP_COUNT_Y, 1)]
-void mainCS(uint3 thread_id : SV_DispatchThreadID)
+void main_cs(uint3 thread_id : SV_DispatchThreadID)
 {
-    if (any(int2(thread_id.xy) >= pass_get_resolution_out()))
+    float2 resolution_out;
+    tex_uav.GetDimensions(resolution_out.x, resolution_out.y);
+    if (any(int2(thread_id.xy) >= resolution_out))
         return;
 
     // initialize to zero, it means no hit
     tex_uav[thread_id.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
  
     Surface surface;
-    surface.Build(thread_id.xy, true, false);
+    surface.Build(thread_id.xy, resolution_out, true, false);
     
     // compute early exit cases
     bool early_exit_1 = pass_is_opaque() && surface.is_transparent(); // if this is an opaque pass, ignore all transparent pixels
@@ -166,10 +168,11 @@ void mainCS(uint3 thread_id : SV_DispatchThreadID)
     float v_dot_r          = dot(-camera_to_pixel, reflection);
 
     // trace
-    float reflection_distance = 0.0f;
-    float2 hit_uv             = trace_ray(thread_id.xy, position, reflection, surface.roughness, reflection_distance);
-    float alpha               = compute_alpha(thread_id.xy, hit_uv, v_dot_r);
-    float3 reflection_color   = tex.SampleLevel(samplers[sampler_bilinear_clamp], hit_uv, 0).rgb * alpha; // modulate with alpha because invalid UVs will get clamped colors
+    float reflection_distance  = 0.0f;
+    float2 hit_uv              = trace_ray(thread_id.xy, position, reflection, surface.roughness, reflection_distance);
+    hit_uv                    -= get_velocity_uv(hit_uv); // reproject
+    float alpha                = compute_alpha(thread_id.xy, hit_uv, v_dot_r);
+    float3 reflection_color    = tex.SampleLevel(samplers[sampler_bilinear_clamp], hit_uv, 0).rgb * alpha; // modulate with alpha because invalid UVs will get clamped colors
 
     // determine reflection roughness
     float max_reflection_distance = 1.0f;

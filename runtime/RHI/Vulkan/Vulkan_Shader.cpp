@@ -46,7 +46,7 @@ namespace Spartan
             vector<RHI_Descriptor>& descriptors,
             const SmallVector<Resource>& resources,
             const RHI_Descriptor_Type descriptor_type,
-            const RHI_Shader_Stage shader_stage
+            const RHI_Shader_Type shader_stage
         )
         {
             // this only matters for textures
@@ -74,14 +74,14 @@ namespace Spartan
 
                 descriptors.emplace_back
                 (
-                    resource.name,   // name
-                    descriptor_type, // type
-                    layout,          // layout
-                    slot,            // slot
-                    shader_stage,    // stage
-                    size,            // struct size
-                    is_array,        // is array
-                    array_length     // array length
+                    resource.name,                         // name
+                    descriptor_type,                       // type
+                    layout,                                // layout
+                    slot,                                  // slot
+                    rhi_shader_type_to_mask(shader_stage), // stage
+                    size,                                  // struct size
+                    is_array,                              // is array
+                    array_length                           // array length
                 );
             }
         };
@@ -110,7 +110,7 @@ namespace Spartan
                 arguments.emplace_back("-spirv");                     // generate SPIR-V code
                 arguments.emplace_back("-fspv-target-env=vulkan1.3"); // specify the target environment
 
-                // this prevents all sorts of issues with constant buffers having random data.
+                // this prevents all sorts of issues with constant buffers having random data
                 arguments.emplace_back("-fspv-preserve-bindings");  // preserves all bindings declared within the module, even when those bindings are unused
                 arguments.emplace_back("-fspv-preserve-interface"); // preserves all interface variables in the entry point, even when those variables are unused
 
@@ -127,7 +127,7 @@ namespace Spartan
                 arguments.emplace_back("-fvk-use-dx-position-w"); // reciprocate SV_Position.w after reading from stage input in PS to accommodate the difference between Vulkan and DirectX
 
                 // Negate SV_Position.y before writing to stage output in VS/DS/GS to accommodate Vulkan's coordinate system
-                if (m_shader_type == RHI_Shader_Vertex)
+                if (m_shader_type == RHI_Shader_Type::Vertex || m_shader_type == RHI_Shader_Type::Domain)
                 {
                     arguments.emplace_back("-fvk-invert-y");
                 }
@@ -138,7 +138,7 @@ namespace Spartan
             {
                 arguments.emplace_back("-Od");           // disable optimizations
                 arguments.emplace_back("-Zi");           // enable debug information
-                arguments.emplace_back("-Qembed_debug"); // embed PDB in shader container (must be used with -Zi)
+                arguments.emplace_back("-Qembed_debug"); // embed pdb in shader container (must be used with -Zi)
             }
 
             // misc
@@ -165,7 +165,7 @@ namespace Spartan
             create_info.codeSize                 = static_cast<size_t>(shader_buffer->GetBufferSize());
             create_info.pCode                    = reinterpret_cast<const uint32_t*>(shader_buffer->GetBufferPointer());
 
-            SP_VK_ASSERT_MSG(vkCreateShaderModule(RHI_Context::device, &create_info, nullptr, &shader_module), "Failed to create shader module");
+            SP_ASSERT_VK_MSG(vkCreateShaderModule(RHI_Context::device, &create_info, nullptr, &shader_module), "Failed to create shader module");
 
             // name the shader module (useful for gpu-based validation)
             RHI_Device::SetResourceName(static_cast<void*>(shader_module), RHI_Resource_Type::Shader, m_object_name.c_str());
@@ -193,10 +193,25 @@ namespace Spartan
         return nullptr;
     }
 
-    void RHI_Shader::Reflect(const RHI_Shader_Stage shader_stage, const uint32_t* ptr, const uint32_t size)
+    void RHI_Shader::Reflect(const RHI_Shader_Type shader_stage, const uint32_t* ptr, const uint32_t size)
     {
         SP_ASSERT(ptr != nullptr);
         SP_ASSERT(size != 0);
+
+        static bool spriv_cross_registered = false;
+        if (!spriv_cross_registered)
+        {
+            unsigned int major         = (SPV_VERSION >> 16) & 0xff; // extract major version
+            unsigned int minor         = (SPV_VERSION >> 8) & 0xff;  // extract minor version
+            unsigned int path_revision = SPV_VERSION & 0xff;         // extract patch version
+            unsigned int revision      = SPV_REVISION;               // get revision
+
+            ostringstream version;
+            version << major << "." << minor << "." << path_revision << "." << revision;
+
+            Settings::RegisterThirdPartyLib("SPIRV-Cross", version.str(), "https://github.com/KhronosGroup/SPIRV-Cross");
+            spriv_cross_registered = true;
+        }
         
         const CompilerHLSL compiler = CompilerHLSL(ptr, size);
         ShaderResources resources   = compiler.get_shader_resources();

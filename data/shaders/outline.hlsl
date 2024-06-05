@@ -23,28 +23,33 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common.hlsl"
 //====================
 
-Pixel_Pos mainVS(Vertex_PosUv input)
+struct vertex
 {
-    Pixel_Pos output;
+    float4 position : SV_POSITION;
+    float2 uv       : TEXCOORD0;
+};
 
+vertex main_vs(vertex input)
+{
     input.position.w = 1.0f;
-    output.position  = mul(input.position, buffer_pass.transform);
-    output.position  = mul(output.position, buffer_frame.view_projection_unjittered);
+    input.position   = mul(input.position, buffer_pass.transform);
+    input.position   = mul(input.position, buffer_frame.view_projection_unjittered);
 
-    return output;
+    return input;
 }
  
-float4 mainPS(Pixel_Pos input) : SV_Target
+float4 main_ps(vertex input) : SV_Target
 {
     // just a color
     return pass_get_f4_value();
 }
 
 [numthreads(THREAD_GROUP_COUNT_X, THREAD_GROUP_COUNT_Y, 1)]
-void mainCS(uint3 thread_id : SV_DispatchThreadID)
+void main_cs(uint3 thread_id : SV_DispatchThreadID)
 {
-    // Out of bounds check
-    if (any(int2(thread_id.xy) >= pass_get_resolution_out()))
+    float2 resolution_out;
+    tex_uav.GetDimensions(resolution_out.x, resolution_out.y);
+    if (any(int2(thread_id.xy) >= resolution_out))
         return;
 
     float4 silhouette = tex[thread_id.xy];

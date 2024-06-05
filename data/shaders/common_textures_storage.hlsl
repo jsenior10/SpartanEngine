@@ -27,55 +27,53 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //============================
 
 // g-buffer
-Texture2D tex_albedo       : register(t0);
-Texture2D tex_normal       : register(t1);
-Texture2D tex_material     : register(t2);
-Texture2D tex_velocity     : register(t3);
-Texture2D tex_depth        : register(t4);
-Texture2D tex_depth_opaque : register(t5);
+Texture2D tex_albedo         : register(t0);
+Texture2D tex_normal         : register(t1);
+Texture2D tex_material       : register(t2);
+Texture2D tex_velocity       : register(t3);
+Texture2D tex_depth          : register(t4);
+Texture2D tex_depth_backface : register(t5);
+Texture2D tex_depth_opaque   : register(t6);
 
 // lighting
-Texture2D tex_light_diffuse              : register(t6);
-Texture2D tex_light_diffuse_transparent  : register(t7);
-Texture2D tex_light_specular             : register(t8);
-Texture2D tex_light_specular_transparent : register(t9);
-Texture2D tex_light_volumetric           : register(t10);
+Texture2D tex_light_diffuse              : register(t7);
+Texture2D tex_light_diffuse_transparent  : register(t8);
+Texture2D tex_light_specular             : register(t9);
+Texture2D tex_light_specular_transparent : register(t10);
+Texture2D tex_light_volumetric           : register(t11);
 
-// shadow maps (depth and color)
-Texture2DArray tex_light_directional_depth : register(t11);
-Texture2DArray tex_light_directional_color : register(t12);
-TextureCube tex_light_point_depth          : register(t13);
-TextureCube tex_light_point_color          : register(t14);
-Texture2D tex_light_spot_depth             : register(t15);
-Texture2D tex_light_spot_color             : register(t16);
+// shadow maps
+Texture2DArray tex_light_depth : register(t12);
+Texture2DArray tex_light_color : register(t13);
 
 // misc
-Texture2D tex_noise_normal       : register(t17);
-Texture2DArray tex_noise_blue    : register(t18);
-Texture2D tex_lut_ibl            : register(t19);
-Texture2D tex_environment        : register(t20);
-Texture2D tex_ssgi               : register(t21);
-Texture2D tex_ssr                : register(t22);
-Texture2D tex_frame              : register(t23);
-Texture2D tex                    : register(t24);
-Texture2D tex2                   : register(t25);
-Texture2D tex_font_atlas         : register(t26);
-TextureCube tex_reflection_probe : register(t27);
-Texture2DArray tex_sss           : register(t28);
+Texture2D tex_noise_normal       : register(t14);
+Texture2DArray tex_noise_blue    : register(t15);
+Texture2D tex_lut_ibl            : register(t16);
+Texture2D tex_environment        : register(t17);
+Texture2D tex_ssgi               : register(t18);
+Texture2D tex_ssr                : register(t19);
+Texture2D tex_frame              : register(t20);
+Texture2D tex                    : register(t21);
+Texture2D tex2                   : register(t22);
+Texture2D tex_font_atlas         : register(t23);
+TextureCube tex_reflection_probe : register(t24);
+Texture2DArray tex_sss           : register(t25);
 
 //= MATERIALS ===============================================================================
 // texture array containing all material present int the world
-static const uint material_albedo    = 0; 
-static const uint material_roughness = 4; 
-static const uint material_metalness = 8; 
-static const uint material_normal    = 12;
-static const uint material_occlusion = 16;
-static const uint material_emission  = 20;
-static const uint material_height    = 24;
-static const uint material_mask      = 28;
+static const uint material_texture_slots = 4;
+static const uint material_albedo    = material_texture_slots * 0;
+static const uint material_roughness = material_texture_slots * 1;
+static const uint material_metalness = material_texture_slots * 2;
+static const uint material_normal    = material_texture_slots * 3;
+static const uint material_occlusion = material_texture_slots * 4;
+static const uint material_emission  = material_texture_slots * 5;
+static const uint material_height    = material_texture_slots * 6;
+static const uint material_mask      = material_texture_slots * 7;
 
-Texture2D tex_materials[] : register(t29, space1);
-#define GET_TEXTURE(index_texture) tex_materials[buffer_frame.material_index + index_texture]
+Texture2D tex_materials[] : register(t26, space1);
+#define GET_TEXTURE(index_texture) tex_materials[pass_get_material_index() + index_texture]
 
 // property buffer containg all materials present in the world
 struct Material
@@ -105,26 +103,25 @@ struct Material
 };
 
 RWStructuredBuffer<Material> buffer_materials : register(u0);
-Material GetMaterial() { return buffer_materials[buffer_frame.material_index]; }
+Material GetMaterial() { return buffer_materials[pass_get_material_index()]; }
 //===========================================================================================
 
 //= LIGHTS =============================================
 struct Light_
 {
-    matrix view_projection[6];
-    
-    float intensity;
-    float range;
-    float angle;
-    float bias;
+    matrix transform[2];
 
     float4 color;
-    
+
     float3 position;
-    float normal_bias;
-    
+    float intensity;
+
     float3 direction;
+    float range;
+
+    float angle;
     uint flags;
+    float2 padding;
 };
 
 RWStructuredBuffer<Light_> buffer_lights : register(u1);
@@ -134,8 +131,9 @@ RWStructuredBuffer<Light_> buffer_lights : register(u1);
 RWTexture2D<float4> tex_uav                                : register(u2);
 RWTexture2D<float4> tex_uav2                               : register(u3);
 RWTexture2D<float4> tex_uav3                               : register(u4);
-RWTexture2DArray<float4> tex_uav_sss                       : register(u5);
-globallycoherent RWStructuredBuffer<uint> g_atomic_counter : register(u6); // used by FidelityFX SPD
-globallycoherent RWTexture2D<float4> tex_uav_mips[12]      : register(u7); // used by FidelityFX SPD
+RWTexture2D<uint>   tex_uav_uint                           : register(u5);
+RWTexture2DArray<float4> tex_uav_sss                       : register(u6);
+globallycoherent RWStructuredBuffer<uint> g_atomic_counter : register(u7); // used by FidelityFX SPD
+globallycoherent RWTexture2D<float4> tex_uav_mips[12]      : register(u8); // used by FidelityFX SPD
 
 #endif // SPARTAN_COMMON_TEXTURES

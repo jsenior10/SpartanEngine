@@ -22,7 +22,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //= INCLUDES ========================
 #include "pch.h"
 #include "Entity.h"
-#include "World.h"
 #include "Components/Camera.h"
 #include "Components/Constraint.h"
 #include "Components/Light.h"
@@ -31,6 +30,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Components/AudioListener.h"
 #include "Components/Terrain.h"
 #include "../IO/FileStream.h"
+#include "../Rendering/Renderer.h"
 //===================================
 
 //= NAMESPACES ===============
@@ -47,7 +47,7 @@ namespace Spartan
         {
             // clone basic properties
             shared_ptr<Entity> clone = World::CreateEntity();
-            clone->SetObjectId(SpObject::GenerateObjectId());
+            clone->SetObjectId(SpartanObject::GenerateObjectId());
             clone->SetObjectName(entity->GetObjectName());
             clone->SetActive(entity->IsActive());
             clone->SetHierarchyVisibility(entity->IsVisibleInHierarchy());
@@ -133,7 +133,7 @@ namespace Spartan
         }
     }
 
-	void Entity::Tick()
+    void Entity::Tick()
     {
         if (!m_is_active)
             return;
@@ -153,7 +153,7 @@ namespace Spartan
         {
             stream->Write(m_is_active);
             stream->Write(m_hierarchy_visibility);
-            stream->Write(GetObjectId());
+            stream->Write(m_object_id);
             stream->Write(m_object_name);
             stream->Write(m_position_local);
             stream->Write(m_rotation_local);
@@ -172,7 +172,7 @@ namespace Spartan
                 }
                 else
                 {
-                    stream->Write(static_cast<uint32_t>(ComponentType::Undefined));
+                    stream->Write(static_cast<uint32_t>(ComponentType::Max));
                 }
             }
 
@@ -189,16 +189,16 @@ namespace Spartan
         {
             vector<Entity*>& children = GetChildren();
 
-            // Children count
+            // children count
             stream->Write(static_cast<uint32_t>(children.size()));
 
-            // Children IDs
+            // children IDs
             for (Entity* child : children)
             {
                 stream->Write(child->GetObjectId());
             }
 
-            // Children
+            // children
             for (Entity* child : children)
             {
                 if (child)
@@ -238,13 +238,13 @@ namespace Spartan
         {
             for (uint32_t i = 0; i < static_cast<uint32_t>(m_components.size()); i++)
             {
-                // Type
-                uint32_t component_type = static_cast<uint32_t>(ComponentType::Undefined);
+                // type
+                uint32_t component_type = static_cast<uint32_t>(ComponentType::Max);
                 stream->Read(&component_type);
 
-                if (component_type == static_cast<uint32_t>(ComponentType::Undefined))
+                if (component_type != static_cast<uint32_t>(ComponentType::Max))
                 {
-                    // Id
+                    // id
                     uint64_t component_id = 0;
                     stream->Read(&component_id);
 
@@ -293,15 +293,14 @@ namespace Spartan
             AcquireChildren();
         }
 
-        // resolve the world so that systems like the renderer become aware of it
-        SP_FIRE_EVENT(EventType::WorldResolve);
+        World::Resolve();
     }
 
-    bool Entity::IsActiveRecursively()
+    bool Entity::IsActive() const
     {
         if (shared_ptr<Entity> parent = GetParent())
         {
-            return m_is_active && parent->IsActiveRecursively();
+            return m_is_active && parent->IsActive();
         }
 
         return m_is_active;
@@ -344,7 +343,7 @@ namespace Spartan
             }
         }
 
-        SP_FIRE_EVENT(EventType::WorldResolve);
+        World::Resolve();
     }
 
     void Entity::UpdateTransform()
@@ -368,13 +367,7 @@ namespace Spartan
             child->UpdateTransform();
         }
 
-        for (shared_ptr<Component>& component : m_components)
-        {
-            if (component)
-            {
-                component->OnTransformChanged();
-            }
-        }
+        m_transform_changed_frame = Renderer::GetFrameNum();
     }
 
     void Entity::SetPosition(const Vector3& position)
@@ -665,6 +658,11 @@ namespace Spartan
         }
 
         return nullptr;
+    }
+
+    bool Entity::HasTransformChanged() const
+    {
+        return m_transform_changed_frame == Renderer::GetFrameNum();
     }
 
     Matrix Entity::GetParentTransformMatrix() const

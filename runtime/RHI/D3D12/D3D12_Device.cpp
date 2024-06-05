@@ -28,7 +28,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../RHI_Shader.h"
 #include "../RHI_InputLayout.h"
 #include <wrl/client.h>
-#include "../RHI_CommandPool.h"
+#include "../RHI_Queue.h"
 #include "../Profiling/Profiler.h"
 //=================================
 
@@ -46,7 +46,7 @@ namespace Spartan
         void* m_queue_compute  = nullptr;
         void* m_queue_copy     = nullptr;
 
-        vector<shared_ptr<RHI_CommandPool>> cmd_pools;
+        vector<shared_ptr<RHI_Queue>> queues;
     }
 
     void RHI_Device::Initialize()
@@ -61,10 +61,8 @@ namespace Spartan
         m_max_texture_array_layers   = D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION;
 
         // Find a physical device
-        {
-            SP_ASSERT_MSG(PhysicalDeviceDetect(), "Failed to detect any devices");
-            PhysicalDeviceSelectPrimary();
-        }
+        PhysicalDeviceDetect();
+        PhysicalDeviceSelectPrimary();
 
         // Debug layer
         UINT dxgi_factory_flags = 0;
@@ -173,7 +171,7 @@ namespace Spartan
        RHI_Context::device = nullptr;
     }
 
-    bool RHI_Device::PhysicalDeviceDetect()
+    void RHI_Device::PhysicalDeviceDetect()
     {
         // Create DirectX graphics interface factory
         IDXGIFactory1* factory;
@@ -181,7 +179,7 @@ namespace Spartan
         if (FAILED(result))
         {
             SP_LOG_ERROR("Failed to create a DirectX graphics interface factory, %s.", d3d12_utility::error::dxgi_error_to_string(result));
-            return false;
+            SP_ASSERT(false);
         }
 
         const auto get_available_adapters = [](IDXGIFactory1* factory)
@@ -202,11 +200,7 @@ namespace Spartan
         vector<IDXGIAdapter*> adapters = get_available_adapters(factory);
         factory->Release();
         factory = nullptr;
-        if (adapters.empty())
-        {
-            SP_LOG_ERROR("Couldn't find any adapters");
-            return false;
-        }
+        SP_ASSERT(adapters.size() > 0);
 
         // Save all available adapters
         DXGI_ADAPTER_DESC adapter_desc;
@@ -234,14 +228,22 @@ namespace Spartan
                 static_cast<void*>(display_adapter))                      // data
             );
         }
-
-        return true;
     }
 
     void RHI_Device::PhysicalDeviceSelectPrimary()
     {
         // Get the first available device
         PhysicalDeviceSetPrimary(0);
+    }
+
+    void RHI_Device::QueueWaitAll()
+    {
+
+    }
+
+    RHI_Queue* RHI_Device::GetQueue(const RHI_Queue_Type type)
+    {
+        return nullptr;
     }
 
     void RHI_Device::DeletionQueueAdd(const RHI_Resource_Type resource_type, void* resource)
@@ -257,53 +259,6 @@ namespace Spartan
     bool RHI_Device::DeletionQueueNeedsToParse()
     {
         return false;
-    }
-
-    void RHI_Device::QueueSubmit(const RHI_Queue_Type type, const uint32_t wait_flags, void* cmd_buffer, RHI_Semaphore* wait_semaphore /*= nullptr*/, RHI_Semaphore* signal_semaphore /*= nullptr*/, RHI_Fence* signal_fence /*= nullptr*/)
-    {
-
-    }
-
-    void RHI_Device::QueueWait(const RHI_Queue_Type type)
-    {
-
-    }
-
-    void* RHI_Device::QueueGet(const RHI_Queue_Type type)
-    {
-        if (type == RHI_Queue_Type::Graphics)
-        {
-            return m_queue_graphics;
-        }
-        else if (type == RHI_Queue_Type::Copy)
-        {
-            return m_queue_copy;
-        }
-        else if (type == RHI_Queue_Type::Compute)
-        {
-            return m_queue_compute;
-        }
-
-        return nullptr;
-    }
-
-    RHI_CommandPool* RHI_Device::CommandPoolAllocate(const char* name, const uint64_t swap_chain_id, const RHI_Queue_Type queue_type)
-    {
-        return cmd_pools.emplace_back(make_shared<RHI_CommandPool>(name, swap_chain_id, queue_type)).get();
-    }
-
-    void RHI_Device::CommandPoolDestroy(RHI_CommandPool* cmd_pool)
-    {
-        vector<shared_ptr<RHI_CommandPool>>::iterator it;
-        for (it = cmd_pools.begin(); it != cmd_pools.end();)
-        {
-            if (cmd_pool->GetObjectId() == (*it)->GetObjectId())
-            {
-                it = cmd_pools.erase(it);
-                return;
-            }
-            it++;
-        }
     }
 
     void RHI_Device::UpdateBindlessResources(const array<shared_ptr<RHI_Sampler>, static_cast<uint32_t>(Renderer_Sampler::Max)>* samplers, array<RHI_Texture*, rhi_max_array_size>* textures)

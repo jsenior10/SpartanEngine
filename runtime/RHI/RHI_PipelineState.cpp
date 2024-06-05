@@ -23,11 +23,11 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "pch.h"
 #include "RHI_PipelineState.h"
 #include "RHI_Shader.h"
-#include "RHI_Texture.h"
 #include "RHI_SwapChain.h"
 #include "RHI_BlendState.h"
 #include "RHI_RasterizerState.h"
 #include "RHI_DepthStencilState.h"
+#include "../Rendering/Renderer.h"
 //================================
 
 //= NAMESPACES ===============
@@ -37,6 +37,125 @@ using namespace Spartan::Math;
 
 namespace Spartan
 {
+    namespace
+    {
+        void validate(RHI_PipelineState& pso)
+        {
+            bool has_shader_compute  = pso.shaders[RHI_Shader_Type::Compute] ? pso.shaders[RHI_Shader_Type::Compute]->IsCompiled() : false;
+            bool has_shader_vertex   = pso.shaders[RHI_Shader_Type::Vertex]  ? pso.shaders[RHI_Shader_Type::Vertex]->IsCompiled()  : false;
+            bool has_shader_pixel    = pso.shaders[RHI_Shader_Type::Pixel]   ? pso.shaders[RHI_Shader_Type::Pixel]->IsCompiled()   : false;
+            bool has_render_target   = pso.render_target_color_textures[0] || pso.render_target_depth_texture; // check that there is at least one render target
+            bool has_backbuffer      = pso.render_target_swapchain;                                            // check that no both the swapchain and the color render target are active
+            bool has_graphics_states = pso.rasterizer_state && pso.blend_state && pso.depth_stencil_state;
+            bool is_graphics         = (has_shader_vertex || has_shader_pixel) && !has_shader_compute;
+            bool is_compute          = has_shader_compute && (!has_shader_vertex && !has_shader_pixel);
+
+            SP_ASSERT_MSG(has_shader_compute || has_shader_vertex || has_shader_pixel, "There must be at least one shader");
+            if (is_graphics)
+            {
+                SP_ASSERT_MSG(has_graphics_states, "Graphics states are missing");
+                SP_ASSERT_MSG(has_render_target || has_backbuffer, "A render target is missing");
+                SP_ASSERT(pso.GetWidth() != 0 && pso.GetHeight() != 0);
+            }
+        }
+
+        uint64_t compute_hash(RHI_PipelineState& pso)
+        {
+            uint64_t hash = 0;
+
+            hash = rhi_hash_combine(hash, static_cast<uint64_t>(pso.instancing));
+            hash = rhi_hash_combine(hash, static_cast<uint64_t>(pso.primitive_toplogy));
+
+            if (pso.render_target_swapchain)
+            {
+                hash = rhi_hash_combine(hash, static_cast<uint64_t>(pso.render_target_swapchain->GetFormat()));
+            }
+
+            if (pso.rasterizer_state)
+            {
+                hash = rhi_hash_combine(hash, pso.rasterizer_state->GetHash());
+            }
+
+            if (pso.blend_state)
+            {
+                hash = rhi_hash_combine(hash, pso.blend_state->GetHash());
+            }
+
+            if (pso.depth_stencil_state)
+            {
+                hash = rhi_hash_combine(hash, pso.depth_stencil_state->GetHash());
+            }
+
+            // shaders
+            for (RHI_Shader* shader : pso.shaders)
+            {
+                if (!shader)
+                    continue;
+
+                hash = rhi_hash_combine(hash, shader->GetHash());
+            }
+
+            // rt
+            {
+                // color
+                for (uint32_t i = 0; i < rhi_max_render_target_count; i++)
+                {
+                    if (RHI_Texture* texture = pso.render_target_color_textures[i])
+                    {
+                        hash = rhi_hash_combine(hash, texture->GetObjectId());
+                    }
+                }
+
+                // depth
+                if (pso.render_target_depth_texture)
+                {
+                    hash = rhi_hash_combine(hash, pso.render_target_depth_texture->GetObjectId());
+                }
+
+                // variable rate shading
+                if (pso.vrs_input_texture)
+                {
+                    hash = rhi_hash_combine(hash, pso.vrs_input_texture->GetObjectId());
+                }
+
+                hash = rhi_hash_combine(hash, pso.render_target_array_index);
+            }
+
+            return hash;
+        }
+
+        void get_dimensions(RHI_PipelineState& pso, uint32_t* width, uint32_t* height)
+        {
+            SP_ASSERT(width && height);
+
+            *width  = 0;
+            *height = 0;
+
+            if (pso.render_target_swapchain)
+            {
+                if (width)  *width  = pso.render_target_swapchain->GetWidth();
+                if (height) *height = pso.render_target_swapchain->GetHeight();
+            }
+            else if (pso.render_target_color_textures[0])
+            {
+                if (width)  *width  = pso.render_target_color_textures[0]->GetWidth();
+                if (height) *height = pso.render_target_color_textures[0]->GetHeight();
+            }
+            else if (pso.render_target_depth_texture)
+            {
+                if (width)  *width  = pso.render_target_depth_texture->GetWidth();
+                if (height) *height = pso.render_target_depth_texture->GetHeight();
+            }
+
+            if (pso.resolution_scale)
+            { 
+                float resolution_scale = Renderer::GetOption<float>(Renderer_Option::ResolutionScale);
+                *width                 = static_cast<uint32_t>(*width * resolution_scale);
+                *height                = static_cast<uint32_t>(*height * resolution_scale);
+            }
+        }
+    }
+
     RHI_PipelineState::RHI_PipelineState()
     {
         clear_color.fill(rhi_color_load);
@@ -48,131 +167,11 @@ namespace Spartan
 
     }
 
-    uint64_t RHI_PipelineState::ComputeHash()
+    void RHI_PipelineState::Prepare()
     {
-        m_hash = 0;
-
-        m_hash = rhi_hash_combine(m_hash, static_cast<uint64_t>(instancing)); 
-        m_hash = rhi_hash_combine(m_hash, static_cast<uint64_t>(primitive_toplogy));
-
-        if (render_target_swapchain)
-        {
-            m_hash = rhi_hash_combine(m_hash, static_cast<uint64_t>(render_target_swapchain->GetFormat()));
-        }
-
-        if (rasterizer_state)
-        {
-            m_hash = rhi_hash_combine(m_hash, rasterizer_state->GetHash());
-        }
-
-        if (blend_state)
-        {
-            m_hash = rhi_hash_combine(m_hash, blend_state->GetHash());
-        }
-
-        if (depth_stencil_state)
-        {
-            m_hash = rhi_hash_combine(m_hash, depth_stencil_state->GetHash());
-        }
-
-        // shaders
-        {
-            if (shader_compute)
-            {
-                m_hash = rhi_hash_combine(m_hash, shader_compute->GetHash());
-            }
-
-            if (shader_vertex)
-            {
-                m_hash = rhi_hash_combine(m_hash, shader_vertex->GetHash());
-            }
-
-            if (shader_pixel)
-            {
-                m_hash = rhi_hash_combine(m_hash, shader_pixel->GetHash());
-            }
-        }
-
-        // rt
-        {
-            // color
-            for (uint32_t i = 0; i < rhi_max_render_target_count; i++)
-            {
-                if (RHI_Texture* texture = render_target_color_textures[i])
-                {
-                    m_hash = rhi_hash_combine(m_hash, static_cast<uint64_t>(texture->GetFormat()));
-                }
-            }
-
-            // depth
-            if (render_target_depth_texture)
-            {
-                m_hash = rhi_hash_combine(m_hash, static_cast<uint64_t>(render_target_depth_texture->GetFormat()));
-            }
-        }
-
-        return m_hash;
-    }
-
-    uint32_t RHI_PipelineState::GetWidth() const
-    {
-        if (render_target_swapchain)
-            return render_target_swapchain->GetWidth();
-
-        if (render_target_color_textures[0])
-            return render_target_color_textures[0]->GetWidth();
-
-        if (render_target_depth_texture)
-            return render_target_depth_texture->GetWidth();
-
-        return 0;
-    }
-
-    uint32_t RHI_PipelineState::GetHeight() const
-    {
-        if (render_target_swapchain)
-            return render_target_swapchain->GetHeight();
-
-        if (render_target_color_textures[0])
-            return render_target_color_textures[0]->GetHeight();
-
-        if (render_target_depth_texture)
-            return render_target_depth_texture->GetHeight();
-
-        return 0;
-    }
-
-    bool RHI_PipelineState::IsValid() const
-    {
-        // Deduce states
-        bool has_shader_compute  = shader_compute ? shader_compute->IsCompiled() : false;
-        bool has_shader_vertex   = shader_vertex  ? shader_vertex->IsCompiled()  : false;
-        bool has_shader_pixel    = shader_pixel   ? shader_pixel->IsCompiled()   : false;
-        bool has_render_target   = render_target_color_textures[0] || render_target_depth_texture; // Check that there is at least one render target
-        bool has_backbuffer      = render_target_swapchain;                                        // Check that no both the swapchain and the color render target are active
-        bool has_graphics_states = rasterizer_state && blend_state && depth_stencil_state;
-        bool is_graphics         = (has_shader_vertex || has_shader_pixel) && !has_shader_compute;
-        bool is_compute          = has_shader_compute && (!has_shader_vertex && !has_shader_pixel);
-
-        // There must be at least one shader
-        if (!has_shader_compute && !has_shader_vertex && !has_shader_pixel)
-            return false;
-
-        // If this is a graphics then there must he graphics states
-        if (is_graphics&& !has_graphics_states)
-            return false;
-
-        // If this is a graphics then there must be a render target
-        if (is_graphics&& !has_render_target && !has_backbuffer)
-        {
-            if (!has_render_target && !has_backbuffer)
-                return false;
-            
-            if (has_render_target && has_backbuffer)
-                return false;
-        }
-
-        return true;
+        m_hash = compute_hash(*this);
+        get_dimensions(*this, &m_width, &m_height);
+        validate(*this);
     }
 
     bool RHI_PipelineState::HasClearValues() const
@@ -190,5 +189,25 @@ namespace Spartan
         }
 
         return false;
+    }
+
+    bool RHI_PipelineState::IsGraphics() const
+    {
+        return (HasShader(RHI_Shader_Type::Vertex) || HasShader(RHI_Shader_Type::Pixel)) && !HasShader(RHI_Shader_Type::Compute);
+    }
+
+    bool RHI_PipelineState::IsCompute() const
+    {
+        return HasShader(RHI_Shader_Type::Compute) && !(HasShader(RHI_Shader_Type::Vertex) || HasShader(RHI_Shader_Type::Pixel));
+    }
+
+    bool RHI_PipelineState::HasTessellation()
+    {
+        return HasShader(RHI_Shader_Type::Hull) && HasShader(RHI_Shader_Type::Domain);
+    }
+
+    bool RHI_PipelineState::HasShader(const RHI_Shader_Type shader_stage) const
+    {
+        return shaders[static_cast<uint32_t>(shader_stage)] != nullptr;
     }
 }

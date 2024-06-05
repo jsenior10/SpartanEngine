@@ -28,7 +28,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "ImGui/Implementation/imgui_impl_sdl2.h"
 #include "Widgets/AssetBrowser.h"
 #include "Widgets/Console.h"
-#include "Widgets/MenuBar.h"
+#include "Widgets/TitleBar.h"
 #include "Widgets/ProgressDialog.h"
 #include "Widgets/Properties.h"
 #include "Widgets/Viewport.h"
@@ -45,33 +45,31 @@ using namespace std;
 
 namespace
 {
-    // font
-    constexpr float k_font_size  = 18.0f;
-    constexpr float k_font_scale = 1.0f;
+    float k_font_size         = 18.0f;
+    float k_font_scale        = 1.0f;
+    TitleBar* widget_menu_bar = nullptr;
+    Widget* widget_world      = nullptr;
 
-    // color
-    constexpr ImVec4 k_palette_color_0 = {10.0f / 255.0f, 12.0f / 255.0f, 17.0f / 255.0f, 1.0f};
-    constexpr ImVec4 k_palette_color_1 = {18.0f / 255.0f, 20.0f / 255.0f, 25.0f / 255.0f, 1.0f};
-    constexpr ImVec4 k_palette_color_2 = {22.0f / 255.0f, 30.0f / 255.0f, 45.0f / 255.0f, 1.0f};
-    constexpr ImVec4 k_palette_color_3 = {35.0f / 255.0f, 48.0f / 255.0f, 76.0f / 255.0f, 1.0f};
-    constexpr ImVec4 k_palette_color_4 = {65.0f / 255.0f, 90.0f / 255.0f, 119.0f / 255.0f, 1.0f};
-    constexpr ImVec4 k_palette_color_5 = {119.0f / 255.0f, 141.0f / 255.0f, 169.0f / 255.0f, 1.0f};
-    constexpr ImVec4 k_palette_color_6 = {224.0f / 255.0f, 225.0f / 255.0f, 221.0f / 255.0f, 1.0f};
-
-    MenuBar* widget_menu_bar = nullptr;
-    Widget* widget_world     = nullptr;
-
-    static void process_event(Spartan::sp_variant data)
+    void process_event(Spartan::sp_variant data)
     {
         SDL_Event* event_sdl = static_cast<SDL_Event*>(get<void*>(data));
         ImGui_ImplSDL2_ProcessEvent(event_sdl);
     }
 
-    static void apply_colors()
+    void apply_colors()
     {
         // use default dark style as a base
         ImGui::StyleColorsDark();
         ImVec4* colors = ImGui::GetStyle().Colors;
+
+        // color
+        const ImVec4 k_palette_color_0 = { 10.0f / 255.0f, 12.0f / 255.0f, 17.0f / 255.0f, 1.0f };
+        const ImVec4 k_palette_color_1 = { 18.0f / 255.0f, 20.0f / 255.0f, 25.0f / 255.0f, 1.0f };
+        const ImVec4 k_palette_color_2 = { 22.0f / 255.0f, 30.0f / 255.0f, 45.0f / 255.0f, 1.0f };
+        const ImVec4 k_palette_color_3 = { 35.0f / 255.0f, 48.0f / 255.0f, 76.0f / 255.0f, 1.0f };
+        const ImVec4 k_palette_color_4 = { 65.0f / 255.0f, 90.0f / 255.0f, 119.0f / 255.0f, 1.0f };
+        const ImVec4 k_palette_color_5 = { 119.0f / 255.0f, 141.0f / 255.0f, 169.0f / 255.0f, 1.0f };
+        const ImVec4 k_palette_color_6 = { 224.0f / 255.0f, 225.0f / 255.0f, 221.0f / 255.0f, 1.0f };
 
         colors[ImGuiCol_Text]                  = k_palette_color_6;
         colors[ImGuiCol_TextDisabled]          = k_palette_color_6;
@@ -125,7 +123,7 @@ namespace
         colors[ImGuiCol_ModalWindowDimBg]      = k_palette_color_2;
     }
 
-    static void apply_style()
+    void apply_style()
     {
         ImGuiStyle& style = ImGui::GetStyle();
 
@@ -157,12 +155,9 @@ namespace
     }
 }
 
-Editor::Editor()
+Editor::Editor(const std::vector<std::string>& args)
 {
-    // initialize the engine
-    Spartan::Engine::Initialize();
-
-    // initialize ImGui
+    Spartan::Engine::Initialize(args);
     ImGui::CreateContext();
 
     // configure ImGui
@@ -181,11 +176,11 @@ Editor::Editor()
     config.GlyphOffset.y = -2.0f;
 
     const string dir_fonts = Spartan::ResourceCache::GetResourceDirectory(Spartan::ResourceDirectory::Fonts) + "/";
-    font_normal = io.Fonts->AddFontFromFileTTF((dir_fonts + "OpenSans/OpenSans-Medium.ttf").c_str(), k_font_size * Spartan::Window::GetDpiScale());
-    font_bold   = io.Fonts->AddFontFromFileTTF((dir_fonts + "OpenSans/OpenSans-Bold.ttf").c_str(), k_font_size * Spartan::Window::GetDpiScale(), &config);
-    io.FontGlobalScale = k_font_scale;
+    font_normal            = io.Fonts->AddFontFromFileTTF((dir_fonts + "OpenSans/OpenSans-Medium.ttf").c_str(), k_font_size * Spartan::Window::GetDpiScale());
+    font_bold              = io.Fonts->AddFontFromFileTTF((dir_fonts + "OpenSans/OpenSans-Bold.ttf").c_str(), k_font_size * Spartan::Window::GetDpiScale(), &config);
+    io.FontGlobalScale     = k_font_scale;
 
-    // initialise ImGui backends
+    // initialise imgui backends
     SP_ASSERT_MSG(ImGui_ImplSDL2_Init(), "Failed to initialize ImGui's SDL backend");
     ImGui::RHI::Initialize();
 
@@ -197,27 +192,27 @@ Editor::Editor()
     IconLoader::Initialize();
     EditorHelper::Initialize(this);
 
-    // create all ImGui widgets
+    // create all imgui widgets
+    m_widgets.emplace_back(make_shared<ProgressDialog>(this));
     m_widgets.emplace_back(make_shared<Console>(this));
     m_widgets.emplace_back(make_shared<Profiler>(this));
     m_widgets.emplace_back(make_shared<ResourceViewer>(this));
     m_widgets.emplace_back(make_shared<ShaderEditor>(this));
     m_widgets.emplace_back(make_shared<RenderOptions>(this));
     m_widgets.emplace_back(make_shared<TextureViewer>(this));
-    m_widgets.emplace_back(make_shared<MenuBar>(this));
-    widget_menu_bar = static_cast<MenuBar*>(m_widgets.back().get());
     m_widgets.emplace_back(make_shared<Viewport>(this));
     m_widgets.emplace_back(make_shared<AssetBrowser>(this));
     m_widgets.emplace_back(make_shared<Properties>(this));
     m_widgets.emplace_back(make_shared<WorldViewer>(this));
     widget_world = m_widgets.back().get();
-    m_widgets.emplace_back(make_shared<ProgressDialog>(this));
+    m_widgets.emplace_back(make_shared<TitleBar>(this));
+    widget_menu_bar = static_cast<TitleBar*>(m_widgets.back().get());
 
-    // allow ImGui to get event's from the engine's event processing loop
+    // allow imgui to get event's from the engine's event processing loop
     SP_SUBSCRIBE_TO_EVENT(Spartan::EventType::Sdl, SP_EVENT_HANDLER_VARIANT_STATIC(process_event));
 
-    // register ImGui as a third party library (will show up in the about window)
-    Spartan::Settings::RegisterThirdPartyLib("Dear ImGui", IMGUI_VERSION, "https://github.com/ocornut/imgui");
+    // register imgui as a third party library (will show up in the about window)
+    Spartan::Settings::RegisterThirdPartyLib("ImGui", IMGUI_VERSION, "https://github.com/ocornut/imgui");
 }
 
 Editor::~Editor()
@@ -234,48 +229,51 @@ Editor::~Editor()
 
 void Editor::Tick()
 {
-    // this is the main editor/engine loop
+    // main loop
     while (!Spartan::Window::WantsToClose())
     {
         bool render_editor = Spartan::Engine::IsFlagSet(Spartan::EngineMode::Editor);
 
-        // imgui tick
-        if (render_editor)
+        // logic
         {
-            ImGui_ImplSDL2_NewFrame();
-            ImGui::NewFrame();
-        }
-
-        // engine tick
-        Spartan::Engine::Tick();
-
-        // editor
-        {
-            // window
+            // imgui
             if (render_editor)
             {
-                // begin window
+                ImGui_ImplSDL2_NewFrame();
+                ImGui::NewFrame();
+            }
+
+            // engine
+            Spartan::Engine::Tick();
+
+            // editor
+            if (render_editor)
+            {
                 BeginWindow();
 
-                // tick widgets
                 for (shared_ptr<Widget>& widget : m_widgets)
                 {
                     widget->Tick();
                 }
 
-                // end window
-                if (m_editor_begun)
-                {
-                    ImGui::End();
-                }
+                ImGui::End();
+            }
+        }
 
-                // render
-                ImGui::Render();
+        // render
+        if (render_editor)
+        {
+            ImGui::Render();
+
+            if (Spartan::Renderer::CanUseCmdList())
+            {
+                // main window
                 ImGui::RHI::render(ImGui::GetDrawData());
+                Spartan::Renderer::Present();
             }
 
             // child windows
-            if (render_editor && ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+            if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
             {
                 ImGui::UpdatePlatformWindows();
                 ImGui::RenderPlatformWindowsDefault();
@@ -300,7 +298,7 @@ void Editor::BeginWindow()
 
     // set window position and size
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    const float padding_offset    = 2.0f * (style.FramePadding.y - MenuBar::GetPadding().y) - 1.0f;
+    const float padding_offset    = 2.0f * (style.FramePadding.y - TitleBar::GetPadding().y) - 1.0f;
     const float offset_y          = widget_menu_bar ? widget_menu_bar->GetHeight() + padding_offset : 0;
 
     ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x, viewport->Pos.y - offset_y));
@@ -316,11 +314,11 @@ void Editor::BeginWindow()
     // begin window
     std::string name = "##main_window";
     bool open = true;
-    m_editor_begun = ImGui::Begin(name.c_str(), &open, window_flags);
+    ImGui::Begin(name.c_str(), &open, window_flags);
     ImGui::PopStyleVar(3);
 
     // begin dock space
-    if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_DockingEnable && m_editor_begun)
+    if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_DockingEnable)
     {
         // dock space
         const auto window_id = ImGui::GetID(name.c_str());
@@ -333,10 +331,10 @@ void Editor::BeginWindow()
 
             // dockBuilderSplitNode(ImGuiID node_id, ImGuiDir split_dir, float size_ratio_for_node_at_dir, ImGuiID* out_id_dir, ImGuiID* out_id_other);
             ImGuiID dock_main_id       = window_id;
-            ImGuiID dock_right_id      = ImGui::DockBuilderSplitNode(dock_main_id,  ImGuiDir_Right, 0.2f,  nullptr, &dock_main_id);
+            ImGuiID dock_right_id      = ImGui::DockBuilderSplitNode(dock_main_id,  ImGuiDir_Right, 0.17f, nullptr, &dock_main_id);
             ImGuiID dock_right_down_id = ImGui::DockBuilderSplitNode(dock_right_id, ImGuiDir_Down,  0.6f,  nullptr, &dock_right_id);
-            ImGuiID dock_down_id       = ImGui::DockBuilderSplitNode(dock_main_id,  ImGuiDir_Down,  0.25f, nullptr, &dock_main_id);
-            ImGuiID dock_down_right_id = ImGui::DockBuilderSplitNode(dock_down_id,  ImGuiDir_Right, 0.6f,  nullptr, &dock_down_id);
+            ImGuiID dock_down_id       = ImGui::DockBuilderSplitNode(dock_main_id,  ImGuiDir_Down,  0.22f, nullptr, &dock_main_id);
+            ImGuiID dock_down_right_id = ImGui::DockBuilderSplitNode(dock_down_id,  ImGuiDir_Right, 0.5f,  nullptr, &dock_down_id);
 
             // dock windows
             ImGui::DockBuilderDockWindow("World",      dock_right_id);
